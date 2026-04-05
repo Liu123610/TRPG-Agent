@@ -29,6 +29,13 @@ class ChatSessionService:
         current_session_id = session_id or str(uuid4())
         config = {"configurable": {"thread_id": current_session_id}}
 
+        # 记录图执行前的历史消息总数，作为切片基准
+        try:
+            before_state = self._graph.get_state(config)
+            num_msgs_before = len(before_state.values.get("messages", [])) if before_state and hasattr(before_state, "values") else 0
+        except Exception:
+            num_msgs_before = 0
+
         if resume_action:
             # 恢复挂起的图
             result = self._graph.invoke(Command(resume=resume_action), config=config)
@@ -49,13 +56,24 @@ class ChatSessionService:
             # 从 interrupt 中获取我们投出的那份 payload (如 {"type": "dice_roll", ...})
             pending_action = state.tasks[0].interrupts[0].value
         
-        # 查找最新的完整 AI 回复文本
-        messages = state.values.get("messages", [])
-        reply = ""
-        for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and not msg.tool_calls:
-                reply = msg.content if isinstance(msg.content, str) else ""
-                break
+        # 只提取本次执行中 AI “新生成”的文本 (切片掉之前的历史记录)
+        all_messages = state.values.get("messages", [])
+        new_messages = all_messages[num_msgs_before:]
+        
+        reply_parts = []
+        for msg in new_messages:
+            # 提取 AI 的文本回复（即使带了 tool_calls，如果有文本也可能包含中间叙事）
+            if isinstance(msg, AIMessage) and msg.content:
+                if isinstance(msg.content, str):
+                    reply_parts.append(msg.content)
+                elif isinstance(msg.content, list):
+                    for part in msg.content:
+                        if isinstance(part, str):
+                            reply_parts.append(part)
+                        elif isinstance(part, dict) and "text" in part:
+                            reply_parts.append(part["text"])
+        
+        reply = "\n\n".join(reply_parts).strip()
 
         return {
             "reply": reply,
