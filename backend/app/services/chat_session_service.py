@@ -1,4 +1,4 @@
-"""Chat session orchestration service for graph execution and persistence."""
+﻿"""Chat session orchestration service for graph execution and persistence."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from langgraph.types import Command
 from app.config.settings import settings
 from app.graph.builder import build_graph
 from app.memory.checkpointer import get_checkpointer
-from app.memory.memory import EnhancedMemory
 
 
 class ChatSessionService:
@@ -20,7 +19,6 @@ class ChatSessionService:
 
     def __init__(self, graph: Any) -> None:
         self._graph = graph
-        self._memory = EnhancedMemory()  # 添加增强记忆功能
 
     def process_turn(
         self,
@@ -31,10 +29,9 @@ class ChatSessionService:
         current_session_id = session_id or str(uuid4())
         config = {"configurable": {"thread_id": current_session_id}}
 
-        # 1. 记录切片基准
+        # Record the message count before this turn to compute delta reply.
         num_msgs_before = self._get_message_count(config)
 
-        # 2. 执行图流转
         if resume_action:
             self._graph.invoke(Command(resume=resume_action), config=config)
         elif message:
@@ -42,9 +39,8 @@ class ChatSessionService:
         else:
             raise ValueError("Must provide either message or resume_action.")
 
-        # 3. 提取执行结果
         state = self._graph.get_state(config)
-        
+
         return {
             "reply": self._extract_new_reply(state, num_msgs_before),
             "plan": None,
@@ -53,7 +49,7 @@ class ChatSessionService:
         }
 
     def _get_message_count(self, config: dict) -> int:
-        """获取当前历史消息数量作为增量解析的基准。"""
+        """Return historical message count as baseline for delta extraction."""
         try:
             state = self._graph.get_state(config)
             return len(state.values.get("messages", [])) if state and hasattr(state, "values") else 0
@@ -61,17 +57,17 @@ class ChatSessionService:
             return 0
 
     def _get_pending_action(self, state: Any) -> Optional[dict]:
-        """从图状态中提取因 interrupt 挂起的交互动作。"""
+        """Extract pending interrupt action from graph state."""
         if state.tasks and state.tasks[0].interrupts:
             return state.tasks[0].interrupts[0].value
         return None
 
     def _extract_new_reply(self, state: Any, num_msgs_before: int) -> str:
-        """提取本次执行中新产生的 AI 纯文本回复。"""
+        """Extract plain-text AI reply generated during this turn."""
         all_messages = state.values.get("messages", [])
         new_messages = all_messages[num_msgs_before:]
-        
-        reply_parts = []
+
+        reply_parts: list[str] = []
         for msg in new_messages:
             if isinstance(msg, AIMessage) and msg.content:
                 if isinstance(msg.content, str):
@@ -82,7 +78,7 @@ class ChatSessionService:
                             reply_parts.append(part)
                         elif isinstance(part, dict) and "text" in part:
                             reply_parts.append(part["text"])
-                            
+
         return "\n\n".join(reply_parts).strip()
 
 
