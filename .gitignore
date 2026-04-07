@@ -47,3 +47,4 @@ backend/data/context_memory.sqlite3
 backend/data/context_memory.sqlite3-shm
 backend/data/context_memory.sqlite3-wal
 AGENTS.md
+data/context_memory.sqlite3

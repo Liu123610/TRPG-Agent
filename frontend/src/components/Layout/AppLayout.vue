@@ -37,7 +37,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, shallowRef } from 'vue'
+import { ref, computed } from 'vue'
 import Sidebar from './Sidebar.vue'
 import WelcomePage from '../Welcome/WelcomePage.vue'
 import ChatPage from '../Chat/ChatPage.vue'

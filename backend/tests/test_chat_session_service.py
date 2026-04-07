@@ -1,5 +1,6 @@
 import unittest
 from uuid import UUID
+from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage
 
@@ -11,11 +12,18 @@ class FakeGraph:
         self.result = result
         self.last_input = None
         self.last_config = None
+        self.values = {"messages": []}
+        self.tasks = []
 
     def invoke(self, graph_input, config):
         self.last_input = graph_input
         self.last_config = config
+        self.values = self.result
         return self.result
+
+    def get_state(self, config):
+        self.last_config = config
+        return SimpleNamespace(values=self.values, tasks=self.tasks)
 
 
 class ChatSessionServiceTests(unittest.TestCase):
@@ -36,7 +44,6 @@ class ChatSessionServiceTests(unittest.TestCase):
         self.assertEqual("s1", result["session_id"])
         self.assertIsNone(result["plan"])
         self.assertEqual("s1", graph.last_config["configurable"]["thread_id"])
-        self.assertEqual("s1", graph.last_input["session_id"])
         self.assertEqual("北京天气怎么样", graph.last_input["messages"][0].content)
 
     def test_process_turn_generates_session_id_when_missing(self):

@@ -1,5 +1,16 @@
-import { chatService } from '../Services_/chatService'
+import { ChatApiError, chatService } from '../Services_/chatService'
 import type { Ref } from 'vue'
+
+const buildUserError = (error: unknown): string => {
+  if (error instanceof ChatApiError) {
+    const requestHint = error.requestId ? ` (request_id: ${error.requestId})` : ''
+    return `${error.message}${requestHint}`
+  }
+  if (error instanceof Error && error.message) {
+    return error.message
+  }
+  return '发送失败，请检查后端服务和模型配置。'
+}
 
 export function useChatSender(
   sessionId: Ref<string | null>,
@@ -35,7 +46,7 @@ export function useChatSender(
         addAssistantMessage('模型没有返回内容。')
       }
     } catch (error) {
-      setError('发送失败，请检查后端服务和模型配置。')
+      setError(buildUserError(error))
       console.error(error)
     } finally {
       setSending(false)
@@ -62,7 +73,7 @@ export function useChatSender(
         addAssistantMessage(reply)
       }
     } catch (error) {
-      setError('发送失败，请检查后端服务和模型配置。')
+      setError(buildUserError(error))
       console.error(error)
     } finally {
       setSending(false)

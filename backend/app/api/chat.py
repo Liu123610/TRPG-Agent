@@ -1,6 +1,8 @@
 """Chat API router."""
 
+import logging
 import sqlite3
+from uuid import uuid4
 
 from fastapi import HTTPException
 from fastapi import APIRouter
@@ -10,8 +12,23 @@ from app.api.schemas import ChatRequest, ChatResponse
 from app.services.chat_session_service import get_chat_session_service
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+logger = logging.getLogger(__name__)
 
 CHAT_SESSION_SERVICE = get_chat_session_service()
+
+
+def _raise_chat_http_error(status_code: int, code: str, message: str, exc: Exception) -> None:
+    """统一包装错误信息，确保前端拿到可读的失败原因与 request_id。"""
+    request_id = str(uuid4())
+    logger.exception("chat failed request_id=%s code=%s", request_id, code)
+    raise HTTPException(
+        status_code=status_code,
+        detail={
+            "code": code,
+            "message": message,
+            "request_id": request_id,
+        },
+    ) from exc
 
 
 @router.post("", response_model=ChatResponse)
@@ -30,20 +47,31 @@ async def chat(payload: ChatRequest) -> ChatResponse:
             pending_action=result.get("pending_action"),
         )
     except sqlite3.Error as exc:
-        raise HTTPException(
+        _raise_chat_http_error(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Conversation memory storage is unavailable.",
-        ) from exc
+            code="memory_unavailable",
+            message="Conversation memory storage is unavailable.",
+            exc=exc,
+        )
     except ValueError as exc:
-        raise HTTPException(
+        _raise_chat_http_error(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+            code="invalid_request",
+            message=str(exc),
+            exc=exc,
+        )
     except RuntimeError as exc:
-        raise HTTPException(
+        _raise_chat_http_error(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
+            code="upstream_unavailable",
+            message=str(exc),
+            exc=exc,
+        )
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        _raise_chat_http_error(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code="unexpected_error",
+            message=f"Unexpected backend error: {type(exc).__name__}: {exc}",
+            exc=exc,
+        )
 

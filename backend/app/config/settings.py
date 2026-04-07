@@ -24,8 +24,12 @@ class Settings(BaseSettings):
     )
     llm_temperature: float = 0.7
     llm_timeout_seconds: float = Field(
-        default=20.0,
+        default=60.0,
         validation_alias=AliasChoices("TRPG_LLM_TIMEOUT_SECONDS", "OPENAI_TIMEOUT"),
+    )
+    llm_max_retries: int = Field(
+        default=1,
+        validation_alias=AliasChoices("TRPG_LLM_MAX_RETRIES", "OPENAI_MAX_RETRIES"),
     )
     memory_db_path: str = Field(
         default="data/context_memory.sqlite3",

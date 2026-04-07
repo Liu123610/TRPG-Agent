@@ -16,6 +16,39 @@ export type ChatResponsePayload = {
   pending_action?: PendingAction | null
 }
 
+export class ChatApiError extends Error {
+  status: number
+  code?: string
+  requestId?: string
+
+  constructor(status: number, message: string, code?: string, requestId?: string) {
+    super(message)
+    this.name = 'ChatApiError'
+    this.status = status
+    this.code = code
+    this.requestId = requestId
+  }
+}
+
+const parseErrorPayload = (payload: any): { message: string; code?: string; requestId?: string } => {
+  if (!payload) return { message: '' }
+
+  const detail = payload.detail ?? payload
+  if (typeof detail === 'string') {
+    return { message: detail }
+  }
+
+  if (typeof detail === 'object') {
+    return {
+      message: String(detail.message ?? ''),
+      code: typeof detail.code === 'string' ? detail.code : undefined,
+      requestId: typeof detail.request_id === 'string' ? detail.request_id : undefined
+    }
+  }
+
+  return { message: '' }
+}
+
 export const chatService = {
   async sendMessage(params: {
     session_id: string | null
@@ -32,7 +65,24 @@ export const chatService = {
       body: JSON.stringify(payload)
     })
 
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    if (!response.ok) {
+      let parsed: { message: string; code?: string; requestId?: string } = { message: '' }
+      try {
+        const body = await response.json()
+        parsed = parseErrorPayload(body)
+      } catch {
+        parsed = { message: '' }
+      }
+
+      const fallbackMessage = `请求失败（HTTP ${response.status}）`
+      throw new ChatApiError(
+        response.status,
+        parsed.message || fallbackMessage,
+        parsed.code,
+        parsed.requestId
+      )
+    }
+
     return await response.json()
   }
 }

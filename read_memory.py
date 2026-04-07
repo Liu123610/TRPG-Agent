@@ -1,0 +1,64 @@
+import sys
+from pathlib import Path
+
+# 把 backend 目录加到 Python 路径好引入官方 checkpointer
+sys.path.append(str(Path(__file__).parent / "backend"))
+
+from app.memory.checkpointer import get_checkpointer
+
+def read_summary(db_path: str):
+    """使用 LangGraph 官方 Checkpointer 从最近的存档中提取摘要"""
+    try:
+        # 直接使用官方预置的反序列化能力
+        saver = get_checkpointer(db_path)
+        
+        # 搜索所有 thread_id
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT thread_id FROM checkpoints LIMIT 5")
+        rows = cur.fetchall()
+        conn.close()
+
+        if not rows:
+            print("未在数据库中找到任何记忆记录，对话可能还没落盘。")
+            return
+            
+        print(f"找到 {len(rows)} 个活跃对话 (thread_id)，正在解析最新的一条记录...\n")
+        
+        for idx, row in enumerate(rows):
+            thread_id = row[0]
+            config = {"configurable": {"thread_id": thread_id}}
+            
+            # 使用官方 get_tuple 获取该进程当前存盘记录
+            checkpoint_tuple = saver.get_tuple(config)
+            
+            if not checkpoint_tuple:
+                continue
+                
+            print(f"[{idx+1}] 会话 ID (thread_id): {thread_id}")
+            channel_values = checkpoint_tuple.checkpoint.get("channel_values", {})
+            summary = channel_values.get("conversation_summary", "")
+            
+            if summary:
+                print(f"  ✨ [前情提要] (大纲摘要):\n{summary}\n")
+            else:
+                print("  ⚠️ [前情提要] 尚无 (对话较短，未触发摘要总结)\n")
+            
+            messages = channel_values.get("messages", [])
+            print(f"  💬 [当前流转的真实消息窗口] (共保留 {len(messages)} 条):")
+            for m in messages:
+                role = m.__class__.__name__.replace("Message", "")
+                content = str(m.content).replace('\n', ' ')
+                # 如果内容过长，做简单截断展示
+                if len(content) > 100:
+                    content = content[:97] + "..."
+                print(f"    [{role}]: {content}")
+            print("-" * 60)
+            
+    except Exception as e:
+        print(f"读取数据库或解析存档失败: {e}")
+
+if __name__ == "__main__":
+    # 由于 FastAPI 一般在 backend 目录运行，db 的默认相对路径在于 backend/data/... 
+    read_summary("backend/data/context_memory.sqlite3")

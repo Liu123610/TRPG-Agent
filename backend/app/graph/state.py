@@ -1,4 +1,4 @@
-# backend/app/graph/state.py
+﻿# backend/app/graph/state.py
 from typing import Annotated, Literal, Optional, TypedDict
 
 from langchain_core.messages import AnyMessage
@@ -19,7 +19,6 @@ AbilityBlock = TypedDict(
     total=False,
 )
 
-
 # 六维对应修正值（通常由能力值推导）
 ModifierBlock = TypedDict(
     "ModifierBlock",
@@ -35,7 +34,7 @@ ModifierBlock = TypedDict(
 )
 
 
-# 玩家常驻状态（可在探索/战斗阶段复用）
+# 玩家常驻状态
 class PlayerState(TypedDict, total=False):
     name: str
     role_class: str
@@ -85,7 +84,8 @@ class GraphState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     output: str
 
-    session_id: str                # 会话唯一标识
+    conversation_summary: str          # 持久的大纲记忆
+    session_id: str                    # 会话唯一标识
 
     # --- 扩展领域字段（当前 chat 主链路未启用） ---
     phase: Literal["exploration", "combat", "resolution"]

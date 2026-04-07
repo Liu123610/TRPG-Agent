@@ -1,6 +1,6 @@
 """LLM service with LangChain ChatOpenAI and native tool-calling support."""
 
-from openai import APITimeoutError, APIConnectionError
+from openai import APITimeoutError, APIConnectionError, BadRequestError
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
@@ -27,7 +27,7 @@ class LLMService:
             model=settings.llm_model,
             temperature=settings.llm_temperature,
             timeout=settings.llm_timeout_seconds,
-            max_retries=0,
+            max_retries=settings.llm_max_retries,
         )
 
     def invoke_with_tools(
@@ -37,11 +37,20 @@ class LLMService:
         system_prompt: str,
     ) -> AIMessage:
         try:
-            runnable = self._client.bind_tools(tools)
-            response = runnable.invoke([SystemMessage(content=system_prompt), *messages])
+            prompt_messages = [SystemMessage(content=system_prompt), *messages]
+
+            # 仅在存在可用工具时启用 tool-calling，避免向上游发送空 tools 数组触发 400。
+            if tools:
+                runnable = self._client.bind_tools(tools)
+                response = runnable.invoke(prompt_messages)
+            else:
+                response = self._client.invoke(prompt_messages)
+
             if isinstance(response, AIMessage):
                 return response
             return AIMessage(content=str(getattr(response, "content", "") or ""))
+        except BadRequestError as exc:
+            raise ValueError(f"LLM bad request: {exc}") from exc
         except APITimeoutError as exc:
             raise RuntimeError(
                 f"LLM request timed out after {settings.llm_timeout_seconds}s. "
