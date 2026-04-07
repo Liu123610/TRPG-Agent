@@ -3,6 +3,7 @@
   <div class="chat-page" ref="containerRef">
     <!-- 左侧聊天区 -->
     <div class="chat-main" :class="{ hidden: rightWidth === 100 }">
+      <!-- 聊天组件 -->
       <div class="chat-container">
         <header class="chat-header">
           <h1>TRPG 助手</h1>
@@ -18,19 +19,18 @@
 
         <p v-if="errorText" class="error-text">{{ errorText }}</p>
 
-        <div class="input-area-wrapper">
-          <ActionPanel
-            :pending-action="pendingAction"
-            :disabled="isSending"
-            @confirm="confirmDiceRoll"
-          />
-          <ChatInput
-            :disabled="isSending || pendingAction !== null"
-            button-text="发送"
-            placeholder="输入消息..."
-            @send="sendTextMessage"
-          />
-        </div>
+        <ActionPanel
+          :pending-action="pendingAction"
+          :disabled="isSending"
+          @confirm="confirmDiceRoll"
+        />
+
+        <ChatInput
+          :disabled="isSending || pendingAction !== null"
+          button-text="发送"
+          placeholder="输入内容并回车发送..."
+          @send="sendTextMessage"
+        />
       </div>
     </div>
 
@@ -72,16 +72,13 @@ import { useChatSender } from '../composables/useChatSender'
 // 导入样式
 import '../styles_/chat-page.css'
 
-// ... 其余代码保持不变（右侧面板逻辑）
-</script>
-<script setup lang="ts">
-import ChatMessage from './ChatMessage.vue'
-import ChatInput from './ChatInput.vue'
-import ActionPanel from './ActionPanel.vue'
-import { useChatSession } from '../../composables/useChatSession'
-import { useChatMessages } from '../../composables/useChatMessages'
-import { useChatSender } from '../../composables/useChatSender'
+// 右侧面板状态
+const containerRef = ref<HTMLElement | null>(null)
+const rightWidth = ref(25)
+const showToggleBtn = ref(false)
+const isDragging = ref(false)
 
+// 聊天逻辑
 const { sessionId, updateSessionId } = useChatSession()
 const {
   messages,
@@ -109,43 +106,67 @@ const { sendTextMessage, confirmDiceRoll } = useChatSender(
   clearError,
   pendingAction
 )
-</script>
 
-<style scoped>
-.chat-container {
-  width: 100%;
-  height: 100%;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  box-sizing: border-box;
+// 切换面板
+const togglePanel = () => {
+  if (rightWidth.value === 0) {
+    rightWidth.value = 25
+  } else {
+    rightWidth.value = 0
+  }
 }
-.chat-panel {
-  width: 100%;
-  max-width: 780px;
-  height: 100%;
-  border: 1px solid #2f2f2f;
-  border-radius: 12px;
-  padding: 16px;
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
+
+// 拖拽逻辑
+const startDrag = (e: MouseEvent) => {
+  if (!containerRef.value) return
+  isDragging.value = true
+  
+  const container = containerRef.value
+  const startX = e.clientX
+  const startWidth = rightWidth.value
+  const containerWidth = container.clientWidth
+
+  const onMouseMove = (moveEvent: MouseEvent) => {
+    if (!isDragging.value) return
+    
+    const deltaX = moveEvent.clientX - startX
+    let newPercent = startWidth - (deltaX / containerWidth) * 100
+    newPercent = Math.max(0, Math.min(100, newPercent))
+    
+    if (newPercent >= 80) {
+      rightWidth.value = 100
+      endDrag()
+    } else {
+      rightWidth.value = newPercent
+    }
+  }
+
+  const onMouseUp = () => {
+    endDrag()
+  }
+
+  const endDrag = () => {
+    isDragging.value = false
+    document.removeEventListener('mousemove', onMouseMove)
+    document.removeEventListener('mouseup', onMouseUp)
+  }
+
+  document.addEventListener('mousemove', onMouseMove)
+  document.addEventListener('mouseup', onMouseUp)
 }
-.chat-header h1 {
-  margin: 0 0 12px;
-  font-size: 22px;
+
+// 鼠标靠近右边缘显示按钮
+const handleMouseMove = (e: MouseEvent) => {
+  const windowWidth = window.innerWidth
+  const distance = windowWidth - e.clientX
+  showToggleBtn.value = distance < 50
 }
-.message-list {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-height: 58vh;
-  overflow-y: auto;
-  padding: 8px 4px;
-}
-.error-text {
-  color: #ff6b6b;
-  margin-top: 10px;
-}
-</style>
+
+onMounted(() => {
+  document.addEventListener('mousemove', handleMouseMove)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('mousemove', handleMouseMove)
+})
+</script>

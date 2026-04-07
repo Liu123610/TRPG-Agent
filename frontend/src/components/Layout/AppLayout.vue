@@ -36,17 +36,19 @@
   </div>
 </template>
 
+<!-- frontend/src/components/Layout/AppLayout.vue -->
+<!-- frontend/src/components/Layout/AppLayout.vue -->
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import Sidebar from './Sidebar.vue'
-import WelcomePage from '../Welcome/WelcomePage.vue'
-import ChatPage from '../Chat/ChatPage.vue'
+import WelcomePage from '../../Pages_/WelcomePage.vue'
+import ChatPage from '../../Pages_/Chatpages.vue'      // ✅ 新增这行
 import DiceDialog from '../DiceDialog/DiceDialog.vue'
 
 // 页面组件映射
 const componentMap: Record<string, any> = {
   welcome: WelcomePage,
-  chat: ChatPage,
+  chat: ChatPage,        // ✅ 新增这行，映射到 ChatPage
   page1: WelcomePage,
   page2: WelcomePage,
   page3: WelcomePage,
@@ -69,10 +71,10 @@ const toggleCollapse = () => {
 }
 
 const handleSelect = (tabId: string) => {
+  console.log('切换到:', tabId)
   currentTab.value = tabId
 }
 </script>
-
 <style scoped>
 .app-layout {
   display: flex;

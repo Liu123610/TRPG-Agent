@@ -62,7 +62,7 @@ const navItems = [
   display: flex;
   flex-direction: column;
   width: 230px;
-  margin-top: 3.3px;
+  margin-top: 10.3px;
   margin-bottom: 3.3px;
   margin-left: 3.3px;
   margin-right: 3.3px;
