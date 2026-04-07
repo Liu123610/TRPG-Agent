@@ -12,6 +12,7 @@ from langgraph.types import Command
 from app.config.settings import settings
 from app.graph.builder import build_graph
 from app.memory.checkpointer import get_checkpointer
+from app.memory.memory import EnhancedMemory
 
 
 class ChatSessionService:
@@ -19,6 +20,7 @@ class ChatSessionService:
 
     def __init__(self, graph: Any) -> None:
         self._graph = graph
+        self._memory = EnhancedMemory()  # 添加增强记忆功能
 
     def process_turn(
         self,
