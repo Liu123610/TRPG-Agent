@@ -1,0 +1,106 @@
+/* frontend/src/styles_/sidebar.css */
+
+.sidebar {
+  width: 240px;
+  height: 100vh;
+  background: rgba(20, 20, 25, 0.95);
+  backdrop-filter: blur(20px);
+  border-right: 0.5px solid rgba(255, 255, 255, 0.06);
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  left: 0;
+  display: flex;
+}
+
+.sidebar.collapsed {
+  width: 72px;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  padding: 12px 8px;
+  gap: 4px;
+}
+
+.nav-btn {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 14px;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  width: 100%;
+  height: 8%;
+  font-size: 15px;
+}
+
+.nav-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.nav-btn.active {
+  background: rgba(66, 184, 131, 0.12);
+  color: #42b883;
+  box-shadow: 0 2px 8px rgba(66, 184, 131, 0.08);
+}
+
+.sidebar.collapsed .nav-btn {
+  justify-content: center;
+  padding: 10px;
+}
+
+.nav-icon {
+  flex-shrink: 0;
+  min-width: 20px;
+}
+
+.nav-label {
+  font-size: 14px;
+  font-weight: 470;
+  white-space: nowrap;
+  letter-spacing: 0.3px;
+}
+
+/* 用户按钮 - 底部固定 */
+.nav-btn:last-child {
+  margin-top: auto;
+  margin-bottom: 8px;
+  border: 0.5px solid rgba(210, 180, 140, 0.25);
+  background: rgba(25, 25, 30, 0.8);
+  height: 10%;
+}
+
+.nav-btn:last-child:hover {
+  border: 0.5px solid rgba(210, 180, 140, 0.55);
+  background: rgba(210, 180, 140, 0.08);
+  box-shadow: 0 0 10px rgba(210, 180, 140, 0.12);
+  transform: translateY(-1px);
+}
+
+.nav-btn:last-child.active {
+  border: 0.5px solid rgba(66, 184, 131, 0.4);
+  background: rgba(66, 184, 131, 0.1);
+  color: #42b883;
+}
+
+.sidebar.collapsed .nav-btn:last-child {
+  margin-left: 0;
+  margin-right: 0;
+  width: 100%;
+  justify-content: center;
+}
+
+.sidebar.collapsed .nav-btn:last-child:hover {
+  transform: scale(1.02);
+}
