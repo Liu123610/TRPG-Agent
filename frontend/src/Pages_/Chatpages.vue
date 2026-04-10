@@ -7,12 +7,23 @@
       <div class="chat-container">
         <header class="chat-header">
           <h1>TRPG 助手</h1>
+          <div class="header-actions">
+            <!-- 调试模式开关 -->
+            <button
+              class="debug-toggle"
+              :class="{ active: debugMode }"
+              @click="toggleDebugMode"
+              title="调试模式"
+            >
+              🔧
+            </button>
+          </div>
         </header>
 
-        <div class="message-list">
+        <div class="message-list" ref="messageListRef">
           <ChatMessage
-            v-for="(msg, idx) in messages"
-            :key="idx"
+            v-for="msg in messages"
+            :key="msg.id"
             :message="msg"
           />
         </div>
@@ -23,7 +34,20 @@
           :pending-action="pendingAction"
           :disabled="isSending"
           @confirm="confirmDiceRoll"
+          @revive="respondToPlayerDeath('revive')"
+          @end-combat="respondToPlayerDeath('end')"
         />
+
+        <!-- 下一回合按钮：战斗中玩家回合且无挂起动作时显示 -->
+        <div v-if="showNextTurnBtn" class="next-turn-bar">
+          <button
+            class="next-turn-btn"
+            :disabled="isSending"
+            @click="sendTextMessage('我结束回合')"
+          >
+            结束回合 →
+          </button>
+        </div>
 
         <ChatInput
           :disabled="isSending || pendingAction !== null"
@@ -61,7 +85,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, provide, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import ChatMessage from '../components/Chat/ChatMessage.vue'
 import ChatInput from '../components/Chat/ChatInput.vue'
 import ActionPanel from '../components/Chat/ActionPanel.vue'
@@ -69,12 +93,13 @@ import CombatPanel from '../components/Chat/CombatPanel.vue'
 import { useChatSession } from '../composables/useChatSession'
 import { useChatMessages } from '../composables/useChatMessages'
 import { useChatSender } from '../composables/useChatSender'
+import { chatService } from '../Services_/chatService'
 
-// 导入样式
 import '../styles_/chat-page.css'
 
 // 右侧面板状态
 const containerRef = ref<HTMLElement | null>(null)
+const messageListRef = ref<HTMLElement | null>(null)
 const rightWidth = ref(25)
 const showToggleBtn = ref(false)
 const isDragging = ref(false)
@@ -87,22 +112,32 @@ const {
   errorText,
   isSending,
   combatState,
+  debugMode,
   addUserMessage,
   addAssistantMessage,
+  addCombatMessage,
+  addToolMessage,
   addConfirmedMessage,
   setPendingAction,
   setPlayerState,
   setCombatState,
   setError,
   setSending,
-  clearError
+  clearError,
+  setMessages,
+  toggleDebugMode,
 } = useChatMessages()
 
-const { sendTextMessage, confirmDiceRoll } = useChatSender(
+// 通过 provide 向子组件注入 debugMode
+provide('debugMode', debugMode)
+
+const { sendTextMessage, confirmDiceRoll, respondToPlayerDeath } = useChatSender(
   sessionId,
   updateSessionId,
   addUserMessage,
   addAssistantMessage,
+  addCombatMessage,
+  addToolMessage,
   addConfirmedMessage,
   setPendingAction,
   setPlayerState,
@@ -113,13 +148,56 @@ const { sendTextMessage, confirmDiceRoll } = useChatSender(
   pendingAction
 )
 
+// 下一回合按钮：战斗中、玩家回合、无挂起动作
+const showNextTurnBtn = computed(() => {
+  if (!combatState.value || pendingAction.value) return false
+  const currentActorId: string = combatState.value.current_actor_id || ''
+  return currentActorId.startsWith('player_')
+})
+
+// 消息自动滚动到底部
+const scrollToBottom = () => {
+  nextTick(() => {
+    if (messageListRef.value) {
+      messageListRef.value.scrollTop = messageListRef.value.scrollHeight
+    }
+  })
+}
+watch(messages, scrollToBottom, { deep: true })
+
+// 初始化：加载历史消息
+onMounted(async () => {
+  document.addEventListener('mousemove', handleMouseMove)
+  if (sessionId.value) {
+    try {
+      const history = await chatService.fetchHistory(sessionId.value)
+      const shouldHydrateMessages = messages.value.length === 1
+        && messages.value[0]?.role === 'assistant'
+        && messages.value[0]?.content === '你好，我是 TRPG 助手。你可以直接开始提问。'
+
+      if (history.messages.length > 0 && shouldHydrateMessages) {
+        setMessages(history.messages.map(m => ({
+          id: crypto.randomUUID(),
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+          timestamp: Date.now(),
+        })))
+      }
+      if (history.player) setPlayerState(history.player)
+      if (history.combat) setCombatState(history.combat)
+    } catch {
+      // 无历史则使用默认欢迎消息
+    }
+  }
+})
+
+onUnmounted(() => {
+  document.removeEventListener('mousemove', handleMouseMove)
+})
+
 // 切换面板
 const togglePanel = () => {
-  if (rightWidth.value === 0) {
-    rightWidth.value = 25
-  } else {
-    rightWidth.value = 0
-  }
+  rightWidth.value = rightWidth.value === 0 ? 25 : 0
 }
 
 // 拖拽逻辑
@@ -167,12 +245,54 @@ const handleMouseMove = (e: MouseEvent) => {
   const distance = windowWidth - e.clientX
   showToggleBtn.value = distance < 50
 }
-
-onMounted(() => {
-  document.addEventListener('mousemove', handleMouseMove)
-})
-
-onUnmounted(() => {
-  document.removeEventListener('mousemove', handleMouseMove)
-})
 </script>
+
+<style scoped>
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.debug-toggle {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 14px;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: all 0.2s;
+}
+.debug-toggle.active {
+  opacity: 1;
+  border-color: #a78bfa;
+  background: rgba(139, 92, 246, 0.15);
+}
+.debug-toggle:hover {
+  opacity: 0.8;
+}
+
+.next-turn-bar {
+  padding: 8px 16px;
+  text-align: center;
+}
+.next-turn-btn {
+  padding: 8px 28px;
+  background: #42b883;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.next-turn-btn:hover:not(:disabled) {
+  background: #38a373;
+}
+.next-turn-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+</style>

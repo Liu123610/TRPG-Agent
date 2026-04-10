@@ -1,4 +1,5 @@
 import { ChatApiError, chatService } from '../Services_/chatService'
+import type { HpChange } from '../Services_/chatService'
 import type { Ref } from 'vue'
 
 const buildUserError = (error: unknown): string => {
@@ -17,6 +18,8 @@ export function useChatSender(
   updateSessionId: (id: string) => void,
   addUserMessage: (content: string) => void,
   addAssistantMessage: (content: string) => void,
+  addCombatMessage: (content: string, hpChanges: HpChange[]) => void,
+  addToolMessage: (content: string) => void,
   addConfirmedMessage: (reason?: string) => void,
   setPendingAction: (action: any) => void,
   setPlayerState: (state: any) => void,
@@ -26,62 +29,56 @@ export function useChatSender(
   clearError: () => void,
   pendingActionRef: Ref<any>
 ) {
-  const processResponseData = (data: any) => {
-    if (data.session_id) updateSessionId(data.session_id)
-    setPendingAction(data.pending_action || null)
-    
-    if (data.player !== undefined) setPlayerState(data.player)
-    if (data.combat !== undefined) setCombatState(data.combat)
+  // SSE 流式发送的通用逻辑
+  const streamRequest = async (params: {
+    session_id: string | null
+    message?: string
+    resume_action?: string
+  }) => {
+    clearError()
+    setSending(true)
 
-    const reply = String(data.reply ?? '').trim()
-    if (reply) {
-      addAssistantMessage(reply)
-    } else if (!data.pending_action) {
-      addAssistantMessage('模型没有返回内容。')
+    try {
+      await chatService.sendMessageStream(params, {
+        onAssistantMessage: (content) => addAssistantMessage(content),
+        onCombatAction: (content, hpChanges) => addCombatMessage(content, hpChanges),
+        onToolMessage: (content) => addToolMessage(content),
+        onStateUpdate: (player, combat) => {
+          if (player !== undefined) setPlayerState(player)
+          if (combat !== undefined) setCombatState(combat)
+        },
+        onPendingAction: (action) => setPendingAction(action),
+        onDone: (sid) => {
+          if (sid) updateSessionId(sid)
+        },
+        onError: (msg) => setError(msg),
+      })
+    } catch (error) {
+      setError(buildUserError(error))
+      console.error(error)
+    } finally {
+      setSending(false)
     }
   }
 
   const sendTextMessage = async (text: string) => {
     if (!text.trim()) return
-    clearError()
-    setSending(true)
     addUserMessage(text)
-
-    try {
-      const data = await chatService.sendMessage({
-        session_id: sessionId.value,
-        message: text
-      })
-
-      processResponseData(data)
-    } catch (error) {
-      setError(buildUserError(error))
-      console.error(error)
-    } finally {
-      setSending(false)
-    }
+    await streamRequest({ session_id: sessionId.value, message: text })
   }
 
   const confirmDiceRoll = async () => {
     if (!pendingActionRef.value) return
-    clearError()
-    setSending(true)
     addConfirmedMessage(pendingActionRef.value.reason)
-
-    try {
-      const data = await chatService.sendMessage({
-        session_id: sessionId.value,
-        resume_action: 'confirmed'
-      })
-
-      processResponseData(data)
-    } catch (error) {
-      setError(buildUserError(error))
-      console.error(error)
-    } finally {
-      setSending(false)
-    }
+    setPendingAction(null)
+    await streamRequest({ session_id: sessionId.value, resume_action: 'confirmed' })
   }
 
-  return { sendTextMessage, confirmDiceRoll }
+  // 玩家死亡后的恢复选择
+  const respondToPlayerDeath = async (choice: 'revive' | 'end') => {
+    setPendingAction(null)
+    await streamRequest({ session_id: sessionId.value, resume_action: choice })
+  }
+
+  return { sendTextMessage, confirmDiceRoll, respondToPlayerDeath }
 }

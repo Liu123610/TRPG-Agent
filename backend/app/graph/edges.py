@@ -50,6 +50,13 @@ def route_from_tool(state: GraphState) -> str:
     return ASSISTANT_NODE
 
 
+def route_from_monster_combat(state: GraphState) -> str:
+    """怪物单步执行后：下一个仍是怪物 → 继续循环；轮到玩家 → 回 LLM 叙述"""
+    if _is_monster_turn(state):
+        return MONSTER_COMBAT_NODE
+    return ASSISTANT_NODE
+
+
 ROUTE_OPTIONS = {
     ASSISTANT_NODE: ASSISTANT_NODE,
     TOOL_NODE: TOOL_NODE,

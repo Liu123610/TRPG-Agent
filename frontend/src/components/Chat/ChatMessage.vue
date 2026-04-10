@@ -1,6 +1,13 @@
 <!-- frontend/src/components/Chat/ChatMessage.vue -->
 <template>
-  <div :class="['message-wrapper', message.role]">
+  <!-- 调试消息：仅调试模式可见 -->
+  <div v-if="message.type === 'tool'" v-show="debugMode" class="tool-message-wrapper">
+    <div class="tool-badge">TOOL</div>
+    <pre class="tool-content">{{ message.content }}</pre>
+  </div>
+
+  <!-- 普通消息 / 战斗动作消息 -->
+  <div v-else :class="['message-wrapper', message.role]">
     <!-- 头像区域 -->
     <div class="avatar">
       <img v-if="avatarUrl" :src="avatarUrl" :alt="displayName" />
@@ -15,40 +22,45 @@
         <span class="display-name">{{ displayName }}</span>
         <span class="timestamp">{{ formatTime(message.timestamp) }}</span>
       </div>
-      <div class="message-bubble">
-        <p class="message-text">{{ message.content }}</p>
+      <div class="message-bubble" :class="{ 'combat-bubble': message.type === 'combat_action' }">
+        <p v-if="message.content" class="message-text">{{ message.content }}</p>
+        <!-- HP 血条动画 -->
+        <HpBar
+          v-for="(hpc, i) in hpChanges"
+          :key="i"
+          :name="hpc.name"
+          :old-hp="hpc.old_hp"
+          :new-hp="hpc.new_hp"
+          :max-hp="hpc.max_hp"
+        />
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, inject } from 'vue'
 import type { ChatMessage } from '../../Services_/chatService'
+import HpBar from './HpBar.vue'
 
 const props = defineProps<{
   message: ChatMessage
 }>()
 
-// 头像接口（可从 message 中获取，或根据 role 配置）
-const avatarUrl = computed(() => {
-  // 预留头像接口
-  if (props.message.avatar) return props.message.avatar
-  return null
-})
+// 由 Chatpages 通过 provide 注入
+const debugMode = inject<boolean>('debugMode', false)
 
-// 显示名称接口
+const hpChanges = computed(() => props.message.metadata?.hp_changes ?? [])
+
+const avatarUrl = computed(() => props.message.avatar ?? null)
+
 const displayName = computed(() => {
   if (props.message.displayName) return props.message.displayName
   return props.message.role === 'user' ? '我' : 'TRPG 助手'
 })
 
-// 头像图标（无图片时显示）
-const avatarIcon = computed(() => {
-  return props.message.role === 'user' ? '👤' : '🤖'
-})
+const avatarIcon = computed(() => props.message.role === 'user' ? '👤' : '🤖')
 
-// 格式化时间
 const formatTime = (timestamp?: string | number) => {
   if (!timestamp) return ''
   const date = new Date(timestamp)
@@ -173,5 +185,44 @@ const formatTime = (timestamp?: string | number) => {
   flex: 1;
   overflow-y: auto;
   padding: 16px 0;
+}
+
+/* 战斗动作气泡 */
+.combat-bubble {
+  border-left: 3px solid #f59e0b !important;
+}
+
+/* 调试工具消息 */
+.tool-message-wrapper {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 16px;
+  margin: 4px 0;
+}
+
+.tool-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(139, 92, 246, 0.3);
+  color: #a78bfa;
+  letter-spacing: 0.5px;
+}
+
+.tool-content {
+  margin: 0;
+  font-size: 12px;
+  font-family: 'Courier New', monospace;
+  color: #8e8e93;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 6px 10px;
+  border-radius: 6px;
+  max-width: 100%;
+  overflow-x: auto;
 }
 </style>

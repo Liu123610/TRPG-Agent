@@ -258,8 +258,8 @@ def resolve_single_attack(
     target: dict,
     attack_name: str | None = None,
     advantage: str = "normal",
-) -> tuple[list[str], int]:
-    """执行一次单体攻击的纯计算逻辑，返回 (日志行列表, 实际伤害值)。
+) -> tuple[list[str], int, dict | None]:
+    """执行一次单体攻击的纯计算逻辑，返回 (日志行列表, 实际伤害值, hp_change 信息)。
     会原地修改 target["hp"] 与 attacker["action_available"]。"""
     import re
 
@@ -306,6 +306,7 @@ def resolve_single_attack(
         lines.append(f"命中骰: {hit_result} vs AC {target_ac}")
 
     damage_dealt = 0
+    hp_change: dict | None = None
     if hit:
         if crit:
             crit_dice = re.sub(r"(\d+)d(\d+)", lambda m: f"{int(m.group(1))*2}d{m.group(2)}", dmg_dice)
@@ -321,13 +322,21 @@ def resolve_single_attack(
         new_hp = max(0, old_hp - damage_dealt)
         target["hp"] = new_hp
         lines.append(f"{tgt_name} HP: {old_hp} → {new_hp}")
+
+        hp_change = {
+            "id": target.get("id", ""),
+            "name": tgt_name,
+            "old_hp": old_hp,
+            "new_hp": new_hp,
+            "max_hp": target.get("max_hp", old_hp),
+        }
         if new_hp == 0:
             lines.append(f"{tgt_name} 倒下了！")
     else:
         lines.append("未命中！" if natural != 1 else "严重失误！攻击完全落空！")
 
     attacker["action_available"] = False
-    return lines, damage_dealt
+    return lines, damage_dealt, hp_change
 
 
 def advance_turn(combat_dict: dict) -> str:
@@ -457,18 +466,23 @@ def attack_action(
 
     attacker = participants.get(attacker_id)
     target = participants.get(target_id)
-    if not attacker:
-        return f"找不到攻击者 '{attacker_id}'。"
-    if not target:
-        return f"找不到目标 '{target_id}'。"
 
-    # 前置校验：回合归属、目标存活、动作资源
+    # 前置校验 — 错误统一走 Command+ToolMessage 确保 LLM 不会忽略
+    def _reject(msg: str) -> Command:
+        return Command(update={"messages": [
+            ToolMessage(content=f"[攻击失败] {msg}", tool_call_id=tool_call_id)
+        ]})
+
+    if not attacker:
+        return _reject(f"找不到攻击者 '{attacker_id}'。")
+    if not target:
+        return _reject(f"找不到目标 '{target_id}'。")
     if combat_dict.get("current_actor_id") != attacker_id:
-        return f"现在不是 {attacker.get('name', attacker_id)} 的回合，当前行动者为 {combat_dict.get('current_actor_id')}。"
+        return _reject(f"现在不是 {attacker.get('name', attacker_id)} 的回合，当前行动者为 {combat_dict.get('current_actor_id')}。")
     if target.get("hp", 0) <= 0:
-        return f"目标 {target.get('name', target_id)} 已经倒下，无法攻击。"
+        return _reject(f"目标 {target.get('name', target_id)} 已经倒下，无法攻击。")
     if not attacker.get("action_available", True):
-        return f"{attacker.get('name', attacker_id)} 本回合的动作已用尽。"
+        return _reject(f"{attacker.get('name', attacker_id)} 本回合的动作已用尽。")
 
     # 玩家攻击需要前端确认掷骰
     if attacker.get("side") == "player":
@@ -492,16 +506,18 @@ def attack_action(
             ]})
 
     # 委托核心计算函数
-    lines, _ = resolve_single_attack(attacker, target, attack_name, advantage)
+    lines, _, hp_change = resolve_single_attack(attacker, target, attack_name, advantage)
 
-    return Command(
-        update={
-            "combat": combat_dict,
-            "messages": [
-                ToolMessage(content="\n".join(lines), tool_call_id=tool_call_id)
-            ],
-        }
-    )
+    update: dict = {
+        "combat": combat_dict,
+        "messages": [
+            ToolMessage(content="\n".join(lines), tool_call_id=tool_call_id)
+        ],
+    }
+    if hp_change:
+        update["hp_changes"] = [hp_change]
+
+    return Command(update=update)
 
 
 @tool

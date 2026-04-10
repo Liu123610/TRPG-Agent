@@ -50,8 +50,15 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
         },
     )
 
-    # 怪物自动战斗完成后回到 LLM 进行叙述
-    graph.add_edge(MONSTER_COMBAT_NODE, ASSISTANT_NODE)
+    # 怪物单步执行后条件路由：下一个仍是怪物 → 自循环；玩家回合 → LLM 叙述
+    graph.add_conditional_edges(
+        MONSTER_COMBAT_NODE,
+        edges.route_from_monster_combat,
+        {
+            MONSTER_COMBAT_NODE: MONSTER_COMBAT_NODE,
+            ASSISTANT_NODE: ASSISTANT_NODE,
+        },
+    )
 
     # 总结完一定直接结束本回合图流转。由于状态已被精简并落库，下一轮读取时将清爽上阵。
     graph.add_edge(SUMMARIZE_NODE, END)

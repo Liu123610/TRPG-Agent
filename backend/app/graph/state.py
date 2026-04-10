@@ -127,4 +127,7 @@ class GraphState(TypedDict, total=False):
 
     combat: Optional[CombatState]
 
+    # 本轮攻击产生的 HP 变动记录，供前端渲染血条动画
+    hp_changes: list[dict]
+
     event_log: list[dict]

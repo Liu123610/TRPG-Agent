@@ -23,8 +23,13 @@ ASSISTANT_SYSTEM_PROMPT = (
     "不要编造或猜测武器名。\n"
     "4. 战斗简洁模式：在战斗阶段（phase=combat），使用简洁的播报风格，1-2 句话概括工具返回的结果即可。"
     "不要使用表情符号，不要输出大段剧情描写。\n"
-    "5. 怪物回合结算：当你看到 [系统:怪物回合结算] 标记的消息时，"
+    "5. 怪物回合结算：当你看到 [系统:怪物行动] 或 [系统:怪物回合结算] 标记的消息时，"
     "简要向玩家转述关键战果（谁攻击了谁、造成多少伤害），然后询问玩家的行动。\n"
+    "6. 工具结果权威性：当你调用任何战斗工具（attack_action, next_turn 等）后，"
+    "工具返回的结果是唯一的事实来源。如果工具返回错误信息（如'不是你的回合'、'动作已用尽'），"
+    "你必须如实向玩家转达该错误，绝对不能忽略错误而自行编造攻击效果。\n"
+    "7. 禁止虚构战斗结果：在战斗阶段，你绝不可以在没有成功调用 attack_action 工具的情况下"
+    "描述任何攻击命中、伤害或 HP 变化。所有战斗数值必须来自工具返回。\n"
 )
 
 
@@ -34,8 +39,9 @@ def _get_llm_service() -> LLMService:
     return LLMService()
 
 
-def router_node(state: GraphState) -> GraphState:
-    return {**state}
+def router_node(state: GraphState) -> dict:
+    # Do not return the entire state to avoid duplicate updates in stream_mode="updates"
+    return {}
 
 
 def assistant_node(state: GraphState) -> dict:
@@ -147,9 +153,10 @@ def summarize_conversation_node(state: GraphState) -> dict:
 
 
 def monster_combat_node(state: GraphState) -> dict:
-    """怪物/NPC 自动战斗节点：循环执行所有非玩家单位的攻击 + 回合推进，
-    直到轮到玩家行动或战斗结束。系统级确定性逻辑，不经 LLM。"""
+    """怪物/NPC 自动战斗节点：只处理当前一个非玩家单位的攻击 + 推进回合。
+    graph 条件边控制循环：下一个仍是怪物则再次进入本节点。"""
     from app.services.tool_service import resolve_single_attack, advance_turn
+    from langgraph.types import interrupt
 
     combat = state.get("combat")
     if not combat:
@@ -157,21 +164,22 @@ def monster_combat_node(state: GraphState) -> dict:
 
     combat_dict = combat.model_dump() if hasattr(combat, "model_dump") else dict(combat)
     participants = combat_dict.get("participants", {})
+
+    current_id = combat_dict.get("current_actor_id", "")
+    actor = participants.get(current_id)
+
+    # 当前行动者不存在或是玩家方，直接透传
+    if not actor or actor.get("side") == "player":
+        return {"combat": combat_dict}
+
     log_lines: list[str] = []
+    hp_changes: list[dict] = []
 
-    # 循环：只要当前行动者不是玩家方，就自动执行攻击并推进回合
-    max_iterations = len(participants) * 3  # 安全阀防无限循环
-    iterations = 0
-    while iterations < max_iterations:
-        iterations += 1
-        current_id = combat_dict.get("current_actor_id", "")
-        actor = participants.get(current_id)
-        if not actor or actor.get("side") == "player":
-            break
-        if actor.get("hp", 0) <= 0:
-            advance_turn(combat_dict)
-            continue
-
+    # 已死亡的怪物：跳过，直接推进回合
+    if actor.get("hp", 0) <= 0:
+        turn_text = advance_turn(combat_dict)
+        log_lines.append(turn_text)
+    else:
         # 选择第一个存活的玩家单位作为目标
         target = None
         for uid, p in participants.items():
@@ -181,22 +189,55 @@ def monster_combat_node(state: GraphState) -> dict:
 
         if not target:
             log_lines.append("所有玩家单位已倒下！")
-            break
+        else:
+            atk_lines, _, hp_change = resolve_single_attack(actor, target)
+            log_lines.extend(atk_lines)
+            if hp_change:
+                hp_changes.append(hp_change)
 
-        # 执行攻击
-        atk_lines, _ = resolve_single_attack(actor, target)
-        log_lines.extend(atk_lines)
-        log_lines.append("")  # 空行分隔
+            # 推进回合
+            turn_text = advance_turn(combat_dict)
+            log_lines.append(turn_text)
 
-        # 推进回合
-        turn_text = advance_turn(combat_dict)
-        log_lines.append(turn_text)
-        log_lines.append("")
+    # 检测玩家全灭 → 中断，等待前端选择复活/结束
+    all_players_down = all(
+        p.get("hp", 0) <= 0
+        for p in participants.values()
+        if p.get("side") == "player"
+    )
+    if all_players_down and any(p.get("side") == "player" for p in participants.values()):
+        # 先提交当前战斗状态，再中断
+        combat_report = "[系统:怪物行动]\n" + "\n".join(log_lines)
+        # interrupt 挂起 graph，前端收到 pending_action
+        user_choice = interrupt({
+            "type": "player_death",
+            "summary": combat_report,
+            "hp_changes": hp_changes,
+        })
+        # 恢复后：根据玩家选择处理
+        if user_choice == "revive":
+            for p in participants.values():
+                if p.get("side") == "player":
+                    p["hp"] = max(1, p.get("max_hp", 1) // 2)
+            combat_dict["participants"] = participants
+            return {
+                "combat": None,
+                "phase": "exploration",
+                "messages": [HumanMessage(content="[系统] 玩家选择复活。角色恢复了部分生命值，战斗结束。")],
+                "hp_changes": [],
+            }
+        else:
+            return {
+                "combat": None,
+                "phase": "exploration",
+                "messages": [HumanMessage(content="[系统] 玩家角色倒下，战斗结束。")],
+                "hp_changes": [],
+            }
 
-    # 包装为 HumanMessage 以便 LLM 在 ASSISTANT_NODE 中看到并叙述
-    combat_report = "[系统:怪物回合结算]\n" + "\n".join(log_lines)
+    combat_report = "[系统:怪物行动]\n" + "\n".join(log_lines)
 
     return {
         "combat": combat_dict,
         "messages": [HumanMessage(content=combat_report)],
+        "hp_changes": hp_changes,
     }
