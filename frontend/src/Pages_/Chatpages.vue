@@ -84,6 +84,8 @@
         {{ rightWidth === 0 ? '◀' : '▶' }}
       </button>
     </Transition>
+
+    <Dice3D v-if="showDiceAnimation" ref="dice3dRef" class="chat-dice-overlay" />
   </div>
 </template>
 
@@ -94,6 +96,7 @@ import ChatInput from '../components/Chat/ChatInput.vue'
 import ActionPanel from '../components/Chat/ActionPanel.vue'
 import CombatPanel from '../components/Chat/CombatPanel.vue'
 import CharacterPanel from '../components/Chat/CharacterPanel.vue'
+import Dice3D from '../components/Dice3D/Dice3D.vue'
 import { useChatSession } from '../composables/useChatSession'
 import { useChatMessages } from '../composables/useChatMessages'
 import { useChatSender } from '../composables/useChatSender'
@@ -104,6 +107,8 @@ import '../styles_/Chatpages.css'
 // 右侧面板状态
 const containerRef = ref<HTMLElement | null>(null)
 const messageListRef = ref<HTMLElement | null>(null)
+const dice3dRef = ref<InstanceType<typeof Dice3D> | null>(null)
+const showDiceAnimation = ref(false)
 const rightWidth = ref(25)
 const showToggleBtn = ref(false)
 const isDragging = ref(false)
@@ -142,6 +147,17 @@ const rightPanelComponent = computed(() => {
 // 通过 provide 向子组件注入 debugMode
 provide('debugMode', debugMode)
 
+const handleDiceRollAnim = async (rawRoll: number) => {
+  showDiceAnimation.value = true
+  await nextTick()
+  if (dice3dRef.value) {
+    await dice3dRef.value.throwDice(rawRoll)
+    // 动画播完后再停留一会儿让玩家看清
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+  }
+  showDiceAnimation.value = false
+}
+
 const { sendTextMessage, confirmDiceRoll, respondToPlayerDeath } = useChatSender(
   sessionId,
   updateSessionId,
@@ -156,7 +172,8 @@ const { sendTextMessage, confirmDiceRoll, respondToPlayerDeath } = useChatSender
   setError,
   setSending,
   clearError,
-  pendingAction
+  pendingAction,
+  handleDiceRollAnim
 )
 
 // 下一回合按钮：战斗中、玩家回合、无挂起动作
