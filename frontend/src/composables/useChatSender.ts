@@ -17,7 +17,7 @@ export function useChatSender(
   sessionId: Ref<string | null>,
   updateSessionId: (id: string) => void,
   addUserMessage: (content: string) => void,
-  addAssistantMessage: (content: string) => void,
+  addAssistantMessage: (content: string, isStreamingChunk?: boolean) => void,
   addCombatMessage: (content: string, hpChanges: HpChange[]) => void,
   addToolMessage: (content: string) => void,
   addConfirmedMessage: (reason?: string) => void,
@@ -29,18 +29,17 @@ export function useChatSender(
   clearError: () => void,
   pendingActionRef: Ref<any>
 ) {
-  // SSE 流式发送的通用逻辑
   const streamRequest = async (params: {
     session_id: string | null
     message?: string
     resume_action?: string
   }) => {
     clearError()
-    setSending(true)
+    setSending(true)   // isStreaming = true
 
     try {
       await chatService.sendMessageStream(params, {
-        onAssistantMessage: (content) => addAssistantMessage(content),
+        onAssistantMessage: (content) => addAssistantMessage(content, true),
         onCombatAction: (content, hpChanges) => addCombatMessage(content, hpChanges),
         onToolMessage: (content) => addToolMessage(content),
         onStateUpdate: (player, combat) => {
@@ -50,14 +49,17 @@ export function useChatSender(
         onPendingAction: (action) => setPendingAction(action),
         onDone: (sid) => {
           if (sid) updateSessionId(sid)
+          setSending(false)   // 流式正常结束，关闭状态
         },
-        onError: (msg) => setError(msg),
+        onError: (msg) => {
+          setError(msg)
+          setSending(false)   // 出错关闭
+        },
       })
     } catch (error) {
       setError(buildUserError(error))
+      setSending(false)       // 请求级异常关闭
       console.error(error)
-    } finally {
-      setSending(false)
     }
   }
 
@@ -74,7 +76,6 @@ export function useChatSender(
     await streamRequest({ session_id: sessionId.value, resume_action: 'confirmed' })
   }
 
-  // 玩家死亡后的恢复选择
   const respondToPlayerDeath = async (choice: 'revive' | 'end') => {
     setPendingAction(null)
     await streamRequest({ session_id: sessionId.value, resume_action: choice })
