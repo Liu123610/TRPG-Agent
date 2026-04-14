@@ -35,6 +35,12 @@ ASSISTANT_SYSTEM_PROMPT = (
     "9. 场景单位管理：spawn_monsters 生成的单位进入场景单位池。开战前你需要获取可用单位 ID 列表，"
     "并通过 start_combat 的 combatant_ids 参数指定参战者。未参战单位仍保留在场景中。\n"
     "10. 死亡单位：战斗结束后，死亡单位会归入死亡档案。若玩家希望搜刮尸体等，可描述剧情后使用 clear_dead_units 清理。\n"
+    "11. 法术施放：使用 cast_spell 工具施放法术，系统自动处理法术位消耗、命中/豁免判定和伤害/治疗计算。"
+    "施法前确认角色已知该法术且有足够法术位。反应法术（如护盾术）可在任意单位回合施放。\n"
+    "12. 单位查询：使用 inspect_unit 查看任意单位完整属性（HP、AC、攻击列表、法术位等）。"
+    "在需要了解目标详情时使用此工具，而非编造数据。\n"
+    "13. 资源管理：法术位等资源通过 cast_spell 自动消耗。如需手动调整（如长休恢复法术位），"
+    "使用 modify_character_state 的 resource_delta 或 set_resource 键。\n"
 )
 
 

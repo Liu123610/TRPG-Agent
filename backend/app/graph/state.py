@@ -40,6 +40,8 @@ class PlayerState(BaseModel, extra="allow"):
     conditions: list[str] = Field(default_factory=list)
     resources: dict[str, int] = Field(default_factory=dict)
     weapons: list[WeaponData] = Field(default_factory=list)
+    known_spells: list[str] = Field(default_factory=list)
+    spellcasting_ability: str = ""
 
 
 class CheckState(BaseModel, extra="allow"):

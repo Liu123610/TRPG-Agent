@@ -53,3 +53,7 @@ logs/session_test_basic.json
 logs/test_report.md
 logs/trpg_agent.log
 backend/logs/agent_2026-04-13.log
+
+# Ignore all files in the logs directory
+logs/
+backend/logs/

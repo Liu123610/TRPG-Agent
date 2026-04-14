@@ -18,6 +18,7 @@ from app.calculation.predefined_characters import PREDEFINED_CHARACTERS
 from app.calculation.bestiary import spawn_combatants
 from app.calculation.abilities import ability_to_modifier
 from app.graph.state import AttackInfo, CombatState, CombatantState
+from app.spells import get_spell_module
 
 
 # ── 统一状态变更辅助 ─────────────────────────────────────────────
@@ -150,10 +151,11 @@ def modify_character_state(
     state: Annotated[dict, InjectedState] = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = None,
 ) -> Command:
-    """调整任意角色/战斗单位的状态属性。所有涉及 HP、AC、能力值等数值变化都应通过该工具执行。
+    """调整任意角色/战斗单位的状态属性。所有涉及 HP、AC、能力值、资源等数值变化都应通过该工具执行。
 
     支持的 changes 键包括：hp_delta(增减HP)、set_hp(直接设置HP)、ac、speed、
-    abilities(dict)、conditions(list)、add_condition(str)、remove_condition(str) 等。
+    abilities(dict)、conditions(list)、add_condition(str)、remove_condition(str)、
+    resource_delta(dict, 如 {"spell_slot_lv1": -1} 增减资源)、set_resource(dict, 直接设置资源值) 等。
     对于 HP 变化，优先使用 hp_delta（正=治疗, 负=伤害）以确保边界安全。
 
     Args:
@@ -237,6 +239,17 @@ def modify_character_state(
         if c in conds:
             conds.remove(c)
         lines.append(f"  {target_name} -状态: {c}")
+    if "resource_delta" in changes:
+        res = target.setdefault("resources", {})
+        for rk, rv in changes["resource_delta"].items():
+            old_v = res.get(rk, 0)
+            res[rk] = max(0, old_v + int(rv))
+            lines.append(f"  {target_name} {rk}: {old_v} → {res[rk]}")
+    if "set_resource" in changes:
+        res = target.setdefault("resources", {})
+        for rk, rv in changes["set_resource"].items():
+            res[rk] = max(0, int(rv))
+            lines.append(f"  {target_name} {rk} 设为 {res[rk]}")
 
     # 回写变更
     if combat_target and combat_dict:
@@ -248,7 +261,7 @@ def modify_character_state(
 
     # 同步玩家本体
     if player_dict and target_id == f"player_{player_dict.get('name', 'player')}":
-        for key in ("hp", "ac", "abilities", "modifiers", "conditions"):
+        for key in ("hp", "ac", "abilities", "modifiers", "conditions", "resources"):
             if key in target:
                 player_dict[key] = target[key]
         update["player"] = player_dict
@@ -783,6 +796,194 @@ def clear_dead_units(
     })
 
 
+# ── 法术工具 ────────────────────────────────────────────────────
+
+
+@tool
+def cast_spell(
+    spell_id: str,
+    target_ids: list[str],
+    slot_level: int = 0,
+    state: Annotated[dict, InjectedState] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
+) -> Command:
+    """施放法术。系统自动消耗法术位、计算伤害/治疗/豁免、应用效果。
+
+    Args:
+        spell_id: 法术标识符（如 "magic_missile", "cure_wounds", "shield", "burning_hands"）。
+        target_ids: 目标单位 ID 列表。对自身施法传 ["self"]。
+        slot_level: 使用的法术位等级。0 表示使用该法术最低环位。
+    """
+    def _reject(msg: str) -> Command:
+        return Command(update={"messages": [ToolMessage(content=msg, tool_call_id=tool_call_id)]})
+
+    spell_mod = get_spell_module(spell_id)
+    if not spell_mod:
+        return _reject(f"未知法术 '{spell_id}'。")
+
+    spell_def = spell_mod.SPELL_DEF
+    min_level = spell_def["level"]
+    slot_level = slot_level or min_level
+    if slot_level < min_level:
+        return _reject(f"{spell_def['name_cn']}至少需要{min_level}环法术位。")
+
+    # 施法者 = 当前玩家角色
+    player_raw = state.get("player")
+    if not player_raw:
+        return _reject("玩家尚未加载角色卡。")
+    player_dict = player_raw.model_dump() if hasattr(player_raw, "model_dump") else dict(player_raw)
+    player_id = f"player_{player_dict.get('name', 'player')}"
+
+    if spell_id not in player_dict.get("known_spells", []):
+        return _reject(f"角色不会 '{spell_def['name_cn']}'。已知法术: {player_dict.get('known_spells', [])}")
+
+    # 检查法术位（兼容 pact_magic 键名）
+    slot_key = f"spell_slot_lv{slot_level}"
+    pact_key = f"pact_magic_lv{slot_level}"
+    resources = player_dict.get("resources", {})
+    if resources.get(slot_key, 0) > 0:
+        consume_key = slot_key
+    elif resources.get(pact_key, 0) > 0:
+        consume_key = pact_key
+    else:
+        return _reject(f"{slot_level}环法术位已耗尽。")
+
+    # 战斗上下文
+    combat_raw = state.get("combat")
+    combat_dict = combat_raw.model_dump() if hasattr(combat_raw, "model_dump") else dict(combat_raw) if combat_raw else None
+    participants = combat_dict.get("participants", {}) if combat_dict else {}
+    caster_participant = participants.get(player_id)
+
+    # 动作经济
+    casting_time = spell_def.get("casting_time", "action")
+    if caster_participant:
+        # action/bonus_action 法术需要轮到施法者；reaction 不受此限
+        if casting_time in ("action", "bonus_action") and combat_dict.get("current_actor_id") != player_id:
+            return _reject(f"当前不是 {player_dict.get('name')} 的回合。")
+        action_map = {"action": "action_available", "bonus_action": "bonus_action_available", "reaction": "reaction_available"}
+        action_key = action_map[casting_time]
+        if not caster_participant.get(action_key, True):
+            label = {"action": "动作", "bonus_action": "附赠动作", "reaction": "反应"}[casting_time]
+            return _reject(f"本回合的{label}已用尽。")
+        caster_participant[action_key] = False
+
+    # 解析目标
+    scene_units_raw = state.get("scene_units") or {}
+    scene_raw = {k: v.model_dump() if hasattr(v, "model_dump") else dict(v) for k, v in scene_units_raw.items()} if hasattr(scene_units_raw, "items") else {}
+
+    targets: list[dict] = []
+    has_scene_target = False
+    for tid in target_ids:
+        if tid == "self":
+            targets.append(caster_participant if caster_participant else player_dict)
+        elif tid in participants:
+            targets.append(participants[tid])
+        elif tid in scene_raw:
+            targets.append(scene_raw[tid])
+            has_scene_target = True
+        else:
+            return _reject(f"找不到目标 '{tid}'。")
+
+    # 消耗法术位
+    resources[consume_key] -= 1
+    player_dict["resources"] = resources
+
+    # 执行法术（各法术模块原地修改 targets 的 HP 等字段）
+    result = spell_mod.execute(caster=player_dict, targets=targets, slot_level=slot_level)
+
+    # 构建状态更新
+    update: dict = {"player": player_dict}
+    if combat_dict:
+        update["combat"] = combat_dict
+        # 同步战斗参与者的变更回玩家本体
+        if caster_participant:
+            for key in ("hp", "ac", "conditions"):
+                if key in caster_participant:
+                    player_dict[key] = caster_participant[key]
+    if has_scene_target:
+        update["scene_units"] = scene_raw
+
+    if hp_changes := result.get("hp_changes"):
+        update["hp_changes"] = hp_changes
+        # 如果玩家自身受到 HP 变更（如被治疗），同步回 player
+        for hc in hp_changes:
+            if hc.get("id") == player_id:
+                player_dict["hp"] = hc["new_hp"]
+
+    lines = result.get("lines", [])
+    lines.append(f"（剩余{slot_level}环法术位: {resources.get(consume_key, 0)}）")
+    update["messages"] = [ToolMessage(content="\n".join(lines), tool_call_id=tool_call_id)]
+    return Command(update=update)
+
+
+# ── 信息查询工具 ────────────────────────────────────────────────
+
+
+@tool
+def inspect_unit(
+    target_id: str,
+    state: Annotated[dict, InjectedState] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
+) -> Command:
+    """查询任意场景内单位（包括玩家、怪物、NPC）的完整属性信息。
+    返回 HP、AC、能力值、攻击列表、法术位、状态效果等全部信息。
+
+    Args:
+        target_id: 目标单位 ID（如 "player_预设-法师"、"goblin_1"），或 "player" 表示当前玩家。
+    """
+    player_raw = state.get("player")
+    player_dict = player_raw.model_dump() if hasattr(player_raw, "model_dump") else dict(player_raw) if player_raw else None
+
+    if target_id == "player":
+        if not player_dict:
+            return Command(update={"messages": [
+                ToolMessage(content="玩家尚未加载角色卡。", tool_call_id=tool_call_id)
+            ]})
+        target_id = f"player_{player_dict.get('name', 'player')}"
+
+    # 按优先级搜索：战斗参与者 → 场景单位 → 死亡单位 → 玩家本体
+    result = None
+    source = ""
+
+    combat_raw = state.get("combat")
+    if combat_raw:
+        cd = combat_raw.model_dump() if hasattr(combat_raw, "model_dump") else dict(combat_raw)
+        if target_id in cd.get("participants", {}):
+            result = cd["participants"][target_id]
+            source = "战斗参与者"
+
+    if not result:
+        scene_units = state.get("scene_units") or {}
+        if hasattr(scene_units, "items"):
+            for k, v in scene_units.items():
+                if k == target_id:
+                    result = v.model_dump() if hasattr(v, "model_dump") else dict(v)
+                    source = "场景单位"
+                    break
+
+    if not result:
+        dead_units = state.get("dead_units") or {}
+        if hasattr(dead_units, "items"):
+            for k, v in dead_units.items():
+                if k == target_id:
+                    result = v.model_dump() if hasattr(v, "model_dump") else dict(v)
+                    source = "死亡单位"
+                    break
+
+    if not result and player_dict and target_id == f"player_{player_dict.get('name', 'player')}":
+        result = player_dict
+        source = "玩家角色"
+
+    if not result:
+        return Command(update={"messages": [
+            ToolMessage(content=f"找不到单位 '{target_id}'。", tool_call_id=tool_call_id)
+        ]})
+
+    content = f"[{source}] {target_id} 完整信息:\n{json.dumps(result, ensure_ascii=False, indent=2)}"
+    return Command(update={"messages": [ToolMessage(content=content, tool_call_id=tool_call_id)]})
+
+
+
 @lru_cache(maxsize=1)
 def get_tools() -> list[BaseTool]:
     return [
@@ -796,4 +997,6 @@ def get_tools() -> list[BaseTool]:
         next_turn,
         end_combat,
         clear_dead_units,
+        cast_spell,
+        inspect_unit,
     ]

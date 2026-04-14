@@ -31,6 +31,8 @@ PREDEFINED_CHARACTERS: Dict[str, dict] = {
         },
         "conditions": [],
         "resources": {},
+        "known_spells": [],
+        "spellcasting_ability": "",
         "weapons": [
             {"name": "Longsword", "damage_dice": "1d8", "damage_type": "slashing", "weapon_type": "melee", "properties": ["versatile"]},
             {"name": "Handaxe", "damage_dice": "1d6", "damage_type": "slashing", "weapon_type": "melee", "properties": ["light", "thrown"]},
@@ -62,6 +64,8 @@ PREDEFINED_CHARACTERS: Dict[str, dict] = {
         },
         "conditions": [],
         "resources": {"spell_slot_lv1": 2},
+        "known_spells": ["magic_missile", "shield", "burning_hands"],
+        "spellcasting_ability": "int",
         "weapons": [
             {"name": "Dagger", "damage_dice": "1d4", "damage_type": "piercing", "weapon_type": "melee", "properties": ["finesse", "light", "thrown"]},
         ],
@@ -92,6 +96,8 @@ PREDEFINED_CHARACTERS: Dict[str, dict] = {
         },
         "conditions": [],
         "resources": {},
+        "known_spells": [],
+        "spellcasting_ability": "",
         "weapons": [
             {"name": "Shortsword", "damage_dice": "1d6", "damage_type": "piercing", "weapon_type": "melee", "properties": ["finesse", "light"]},
             {"name": "Shortbow", "damage_dice": "1d6", "damage_type": "piercing", "weapon_type": "ranged", "properties": []},
@@ -123,6 +129,8 @@ PREDEFINED_CHARACTERS: Dict[str, dict] = {
         },
         "conditions": [],
         "resources": {"spell_slot_lv1": 2},
+        "known_spells": ["cure_wounds"],
+        "spellcasting_ability": "wis",
         "weapons": [
             {"name": "Mace", "damage_dice": "1d6", "damage_type": "bludgeoning", "weapon_type": "melee", "properties": []},
         ],
@@ -153,6 +161,8 @@ PREDEFINED_CHARACTERS: Dict[str, dict] = {
         },
         "conditions": [],
         "resources": {"spell_slot_lv1": 2},
+        "known_spells": ["magic_missile", "burning_hands"],
+        "spellcasting_ability": "cha",
         "weapons": [
             {"name": "Dagger", "damage_dice": "1d4", "damage_type": "piercing", "weapon_type": "melee", "properties": ["finesse", "light", "thrown"]},
         ],
@@ -183,6 +193,8 @@ PREDEFINED_CHARACTERS: Dict[str, dict] = {
         },
         "conditions": [],
         "resources": {"spell_slot_lv1": 1},
+        "known_spells": ["cure_wounds"],
+        "spellcasting_ability": "wis",
         "weapons": [
             {"name": "Shortsword", "damage_dice": "1d6", "damage_type": "piercing", "weapon_type": "melee", "properties": ["finesse", "light"]},
             {"name": "Longbow", "damage_dice": "1d8", "damage_type": "piercing", "weapon_type": "ranged", "properties": []},
@@ -214,6 +226,8 @@ PREDEFINED_CHARACTERS: Dict[str, dict] = {
         },
         "conditions": [],
         "resources": {"ki_points": 2},
+        "known_spells": [],
+        "spellcasting_ability": "",
         "weapons": [
             {"name": "Shortsword", "damage_dice": "1d6", "damage_type": "piercing", "weapon_type": "melee", "properties": ["finesse", "light"]},
         ],
@@ -244,6 +258,8 @@ PREDEFINED_CHARACTERS: Dict[str, dict] = {
         },
         "conditions": [],
         "resources": {"spell_slot_lv1": 0},
+        "known_spells": [],
+        "spellcasting_ability": "cha",
         "weapons": [
             {"name": "Longsword", "damage_dice": "1d8", "damage_type": "slashing", "weapon_type": "melee", "properties": ["versatile"]},
         ],
@@ -274,6 +290,8 @@ PREDEFINED_CHARACTERS: Dict[str, dict] = {
         },
         "conditions": [],
         "resources": {"pact_magic_lv1": 1},
+        "known_spells": ["burning_hands"],
+        "spellcasting_ability": "cha",
         "weapons": [
             {"name": "Dagger", "damage_dice": "1d4", "damage_type": "piercing", "weapon_type": "melee", "properties": ["finesse", "light", "thrown"]},
         ],
@@ -304,6 +322,8 @@ PREDEFINED_CHARACTERS: Dict[str, dict] = {
         },
         "conditions": [],
         "resources": {"spell_slot_lv1": 2},
+        "known_spells": ["cure_wounds", "burning_hands"],
+        "spellcasting_ability": "wis",
         "weapons": [
             {"name": "Scimitar", "damage_dice": "1d6", "damage_type": "slashing", "weapon_type": "melee", "properties": ["finesse", "light"]},
         ],
@@ -334,6 +354,8 @@ PREDEFINED_CHARACTERS: Dict[str, dict] = {
         },
         "conditions": [],
         "resources": {"spell_slot_lv1": 2},
+        "known_spells": ["cure_wounds"],
+        "spellcasting_ability": "cha",
         "weapons": [
             {"name": "Rapier", "damage_dice": "1d8", "damage_type": "piercing", "weapon_type": "melee", "properties": ["finesse"]},
         ],
@@ -364,6 +386,8 @@ PREDEFINED_CHARACTERS: Dict[str, dict] = {
         },
         "conditions": [],
         "resources": {"rage_uses": 2},
+        "known_spells": [],
+        "spellcasting_ability": "",
         "weapons": [
             {"name": "Greataxe", "damage_dice": "1d12", "damage_type": "slashing", "weapon_type": "melee", "properties": ["heavy", "two-handed"]},
             {"name": "Javelin", "damage_dice": "1d6", "damage_type": "piercing", "weapon_type": "melee", "properties": ["thrown"]},
