@@ -5,7 +5,7 @@ from pathlib import Path
 # 把 backend 目录加到 Python 路径好引入官方 checkpointer
 sys.path.append(str(Path(__file__).parent / "backend"))
 
-from app.memory.checkpointer import close_checkpointer, get_checkpointer
+from backend.app.memory.checkpointer import close_checkpointer, get_checkpointer
 
 async def read_summary(db_path: str):
     """使用 LangGraph 官方异步 Checkpointer 从最近的存档中提取摘要。"""
@@ -50,8 +50,24 @@ async def read_summary(db_path: str):
             print(f"  💬 [当前流转的真实消息窗口] (共保留 {len(messages)} 条):")
             for m in messages:
                 role = m.__class__.__name__.replace("Message", "")
-                content = str(m.content)
-                print(f"    [{role}]: {content}")
+                content = str(m.content).strip()
+                
+                # 1. 拦截并显示 AI 发起的工具调用 (Tool Calls)
+                if hasattr(m, "tool_calls") and m.tool_calls:
+                    for tc in m.tool_calls:
+                        tool_name = tc.get("name", "UnknownTool")
+                        tool_args = tc.get("args", {})
+                        print(f"    [AI 🛠️ 调用工具 -> {tool_name}]: 参数 {tool_args}")
+                
+                # 2. 正常显示文本内容，并针对 ToolMessage 加上工具名称
+                if content:
+                    if role == "Tool":
+                        tool_name = getattr(m, "name", "未知工具")
+                        # 截断过长的工具返回值，避免刷屏
+                        display_content = content[:200] + "..." if len(content) > 200 else content
+                        print(f"    [{role} ⚙️ ({tool_name})]: {display_content}")
+                    else:
+                        print(f"    [{role}]: {content}")
             print("-" * 60)
             
     except Exception as e:
