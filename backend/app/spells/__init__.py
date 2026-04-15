@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from app.spells import burning_hands, cure_wounds, magic_missile, shield
+from app.spells import burning_hands, cure_wounds, magic_missile, shield, ice_knife
 from app.spells._base import SpellDef, SpellResult  # noqa: F401 — re-export
 
 # 法术 ID → 模块；新增法术只需在此注册并创建同名模块
@@ -13,6 +13,7 @@ SPELL_REGISTRY: dict[str, ModuleType] = {
     "cure_wounds": cure_wounds,
     "shield": shield,
     "burning_hands": burning_hands,
+    "ice_knife": ice_knife,
 }
 
 

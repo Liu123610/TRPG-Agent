@@ -184,30 +184,58 @@ def determine_advantage(
     defender: CombatantState,
     conditions: dict[str, bool] | None = None,
 ) -> Literal["normal", "advantage", "disadvantage"]:
-    """根据战斗条件判断攻击是否有优势或劣势"""
-    conditions = conditions or {}
-    advantage_count = 0
-    disadvantage_count = 0
+    """根据战斗条件判断攻击是否有优势或劣势。
+    自动查询 conditions 模块中注册的状态效果。"""
+    from app.conditions import get_combat_effects
 
-    def _get_conditions(c: CombatantState) -> list[str]:
-        return c.conditions if hasattr(c, "conditions") else c.get("conditions", [])
+    extra = conditions or {}
+    adv_count = 0
+    dis_count = 0
 
-    d_conds = _get_conditions(defender)
+    def _get_conditions(c: CombatantState) -> list:
+        raw = c.conditions if hasattr(c, "conditions") else c.get("conditions", [])
+        # 兼容旧版纯字符串列表和新版 ActiveCondition 字典列表
+        return [{"id": x} if isinstance(x, str) else x for x in raw]
+
     a_conds = _get_conditions(attacker)
+    d_conds = _get_conditions(defender)
 
-    if "prone" in d_conds:
-        advantage_count += 1
-    if "restrained" in d_conds:
-        advantage_count += 1
-    if "blinded" in a_conds:
-        disadvantage_count += 1
-    if conditions.get("invisible_attacker"):
-        advantage_count += 1
-    if conditions.get("hidden_attacker"):
-        advantage_count += 1
+    # 基于注册表的状态效果
+    for c in a_conds:
+        eff = get_combat_effects(c.get("id", ""))
+        if not eff:
+            continue
+        if eff.attack_advantage == "advantage":
+            adv_count += 1
+        elif eff.attack_advantage == "disadvantage":
+            dis_count += 1
 
-    if advantage_count > disadvantage_count:
+    for c in d_conds:
+        eff = get_combat_effects(c.get("id", ""))
+        if not eff:
+            continue
+        if eff.defend_advantage == "advantage":
+            adv_count += 1
+        elif eff.defend_advantage == "disadvantage":
+            dis_count += 1
+
+    # 向后兼容：旧版 prone/restrained 硬编码（尚未注册为模块时仍生效）
+    d_ids = {c.get("id") for c in d_conds}
+    if "prone" in d_ids:
+        adv_count += 1
+    if "restrained" in d_ids:
+        adv_count += 1
+
+    # 额外手动标志
+    if extra.get("invisible_attacker"):
+        adv_count += 1
+    if extra.get("hidden_attacker"):
+        adv_count += 1
+
+    if adv_count > 0 and dis_count > 0:
+        return "normal"
+    if adv_count > 0:
         return "advantage"
-    if disadvantage_count > advantage_count:
+    if dis_count > 0:
         return "disadvantage"
     return "normal"
