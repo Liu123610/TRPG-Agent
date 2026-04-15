@@ -57,3 +57,4 @@ backend/logs/agent_2026-04-13.log
 # Ignore all files in the logs directory
 logs/
 backend/logs/
+debuff.md

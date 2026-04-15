@@ -7,6 +7,8 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
+from app.conditions._base import ActiveCondition
+
 
 # ── Pydantic 数据模型 ──────────────────────────────────────────
 # GraphState 保持 TypedDict（LangGraph 框架要求），嵌套字段用 Pydantic 获得校验能力。
@@ -37,7 +39,7 @@ class PlayerState(BaseModel, extra="allow"):
     ac: int = 10
     abilities: AbilityBlock = Field(default_factory=dict)
     modifiers: ModifierBlock = Field(default_factory=dict)
-    conditions: list[str] = Field(default_factory=list)
+    conditions: list[ActiveCondition] = Field(default_factory=list)
     resources: dict[str, int] = Field(default_factory=dict)
     weapons: list[WeaponData] = Field(default_factory=list)
     known_spells: list[str] = Field(default_factory=list)
@@ -80,7 +82,7 @@ class CombatantState(BaseModel, extra="allow"):
     ac: int = 10
     initiative: int = 0
     speed: int = 30
-    conditions: list[str] = Field(default_factory=list)
+    conditions: list[ActiveCondition] = Field(default_factory=list)
 
     # 六维能力值与修正（用于怪物攻击/豁免计算）
     abilities: AbilityBlock = Field(default_factory=dict)
