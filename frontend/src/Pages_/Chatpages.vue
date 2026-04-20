@@ -19,7 +19,7 @@
           </div>
         </header>
 
-        <div class="message-list" ref="messageListRef">
+        <div class="message-list" ref="messageListRef" @scroll="handleScroll">
           <ChatMessage
             v-for="(msg, index) in messages"
             :key="msg.id"
@@ -37,6 +37,8 @@
           @confirm="confirmDiceRoll"
           @revive="respondToPlayerDeath('revive')"
           @end-combat="respondToPlayerDeath('end')"
+          @react="respondToReaction"
+          @skip-reaction="respondToReaction(null)"
         />
 
         <div v-if="showNextTurnBtn" class="next-turn-bar">
@@ -166,7 +168,7 @@ const handleDiceRollAnim = async (rawRoll: number) => {
   showDiceAnimation.value = false
 }
 
-const { sendTextMessage, confirmDiceRoll, respondToPlayerDeath } = useChatSender(
+const { sendTextMessage, confirmDiceRoll, respondToPlayerDeath, respondToReaction } = useChatSender(
   sessionId,
   updateSessionId,
   addUserMessage,
