@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from app.services.chat_session_service import ChatSessionService
 
@@ -84,7 +84,7 @@ def test_stream_ignores_attack_roll_payload_marked_as_non_visual():
         initial_state=initial_state,
         final_state=final_state,
         chunks=[{
-            "monster_combat_node": {
+            "combat_resolution_node": {
                 "messages": [HumanMessage(
                     content="[系统:怪物行动]\nGoblin 处于麻痹状态，无法行动！",
                     additional_kwargs={
@@ -109,4 +109,51 @@ def test_stream_ignores_attack_roll_payload_marked_as_non_visual():
     event_names = [_parse_sse_event(event)[0] for event in raw_events]
 
     assert "combat_action" in event_names
+    assert "dice_roll" not in event_names
+
+
+def test_stream_ignores_hidden_tool_message_but_keeps_pending_action():
+    initial_state = _FakeState({})
+    final_state = _FakeState({
+        "pending_reaction": {
+            "attacker_id": "goblin_1",
+            "attacker_name": "Goblin",
+            "target_id": "player_hero",
+            "target_name": "英雄",
+            "available_reactions": [{"spell_id": "shield", "name_cn": "护盾术", "min_slot": 1}],
+            "attack_roll": {"raw_roll": 12, "attack_bonus": 4, "hit_total": 16, "target_ac": 12},
+        }
+    })
+    graph = _FakeGraph(
+        initial_state=initial_state,
+        final_state=final_state,
+        chunks=[{
+            "tool": {
+                "pending_reaction": {
+                    "attacker_id": "goblin_1",
+                    "attacker_name": "Goblin",
+                    "target_id": "player_hero",
+                    "target_name": "英雄",
+                    "available_reactions": [{"spell_id": "shield", "name_cn": "护盾术", "min_slot": 1}],
+                    "attack_roll": {"raw_roll": 12, "attack_bonus": 4, "hit_total": 16, "target_ac": 12},
+                },
+                "messages": [ToolMessage(
+                    content="Goblin 的攻击命中了 英雄，已进入反应判定，等待玩家选择。",
+                    tool_call_id="call_1",
+                    additional_kwargs={"hidden_from_ui": True},
+                )],
+            }
+        }],
+    )
+    service = ChatSessionService(graph)
+
+    async def _collect_events():
+        return [event async for event in service.process_turn_stream(session_id="demo", message="继续")]
+
+    raw_events = asyncio.run(_collect_events())
+    parsed_events = [_parse_sse_event(event) for event in raw_events]
+    event_names = [name for name, _ in parsed_events]
+
+    assert "pending_action" in event_names
+    assert "tool_message" not in event_names
     assert "dice_roll" not in event_names

@@ -3,6 +3,7 @@
 
 from app.services.tools import (  # noqa: F401
     get_tools,
+    get_tool_profile,
     resolve_single_attack,
     advance_turn,
     prepare_player_for_combat,

@@ -33,6 +33,20 @@ class _FakeSessionService:
             "pending_action": None,
         }
 
+    async def get_history(self, session_id: str, limit: int = 10) -> dict:
+        self.calls.append({
+            "history_session_id": session_id,
+            "history_limit": limit,
+        })
+        return {
+            "messages": [
+                {"role": "user", "content": "我攻击哥布林"},
+                {"role": "assistant", "content": "哥布林被你逼退了半步。"},
+            ],
+            "player": {"name": "英雄"},
+            "combat": {"round": 2},
+        }
+
 
 class _RuntimeFailSessionService:
     async def process_turn(
@@ -118,6 +132,19 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual("upstream_unavailable", data["detail"]["code"])
         self.assertEqual("LLM upstream timeout", data["detail"]["message"])
         self.assertTrue(data["detail"]["request_id"])
+
+    def test_chat_history_endpoint_returns_original_transcript_payload(self):
+        fake = _FakeSessionService()
+        with patch("app.api.chat.CHAT_SESSION_SERVICE", fake):
+            client = TestClient(app)
+            resp = client.get("/api/chat/history", params={"session_id": "demo-history", "limit": 5})
+
+        self.assertEqual(200, resp.status_code)
+        data = resp.json()
+        self.assertEqual("我攻击哥布林", data["messages"][0]["content"])
+        self.assertEqual("哥布林被你逼退了半步。", data["messages"][1]["content"])
+        self.assertEqual("demo-history", fake.calls[-1]["history_session_id"])
+        self.assertEqual(5, fake.calls[-1]["history_limit"])
 
 
 if __name__ == "__main__":

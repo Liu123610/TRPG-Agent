@@ -14,13 +14,16 @@ from app.calculation.bestiary import spawn_combatants
 from app.services.tools._helpers import (
     advance_turn,
     apply_hp_change,
+    apply_attack_damage,
     build_attack_roll_event_payload,
+    build_pending_reaction_state,
     clear_player_combat_fields,
     get_all_combatants,
     get_combatant,
     prepare_player_for_combat,
-    resolve_single_attack,
+    roll_attack_hit,
 )
+from app.services.tools.reactions import get_available_reactions
 
 
 @tool
@@ -207,14 +210,48 @@ def attack_action(
     if not attacker.get("action_available", True):
         return _reject(f"{attacker.get('name', attacker_id)} 本回合的动作已用尽。")
 
-    lines, _, hp_change, extra_info = resolve_single_attack(attacker, target, attack_name, advantage)
+    roll_info = roll_attack_hit(attacker, target, attack_name, advantage)
 
-    attack_roll_payload = build_attack_roll_event_payload({
-        "raw_roll": extra_info.get("raw_roll"),
-        "attack_bonus": extra_info.get("attack_bonus", 0),
-        "hit_total": extra_info.get("final_total", extra_info.get("raw_roll", 0)),
-        "emit_dice_roll": extra_info.get("raw_roll") is not None,
-    })
+    if (
+        player_dict
+        and attacker.get("side") != "player"
+        and target is player_dict
+        and roll_info.get("hit")
+        and not roll_info.get("blocked")
+    ):
+        reaction_context = {
+            "attacker": attacker.get("name", attacker_id),
+            "attack_roll": {
+                "raw_roll": roll_info.get("raw_roll", roll_info.get("natural", 0)),
+                "attack_bonus": roll_info.get("attack_bonus", 0),
+                "final_total": roll_info.get("hit_total", 0),
+                "hit_total": roll_info.get("hit_total", 0),
+                "target_ac": roll_info.get("target_ac", 10),
+            },
+        }
+        available_reactions = get_available_reactions(player_dict, "on_hit", reaction_context)
+        if available_reactions:
+            pending_reaction_msg = ToolMessage(
+                content=(
+                    f"{attacker.get('name', attacker_id)} 的攻击命中了 {target.get('name', target_id)}，"
+                    "已进入反应判定，等待玩家选择。"
+                ),
+                tool_call_id=tool_call_id,
+                additional_kwargs={"hidden_from_ui": True},
+            )
+            return Command(
+                update={
+                    "combat": combat_dict,
+                    "player": player_dict,
+                    "messages": [pending_reaction_msg],
+                    "pending_reaction": build_pending_reaction_state(attacker, target, roll_info, available_reactions),
+                    "reaction_choice": None,
+                }
+            )
+
+    lines, _, hp_change, _ = apply_attack_damage(attacker, target, roll_info)
+
+    attack_roll_payload = build_attack_roll_event_payload(roll_info)
 
     tool_message_kwargs = {}
     if attack_roll_payload:

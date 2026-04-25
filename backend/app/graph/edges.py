@@ -4,14 +4,26 @@ from langchain_core.messages import AIMessage
 
 from app.graph.constants import (
     ASSISTANT_NODE,
+    COMBAT_ASSISTANT_NODE,
+    COMBAT_RESOLUTION_NODE,
     END_NODE,
     ROUTER_NODE,
     TOOL_NODE,
     SUMMARIZE_NODE,
-    MONSTER_COMBAT_NODE,
     REACTION_RESOLUTION_NODE,
 )
 from app.graph.state import GraphState
+
+
+def _assistant_node_for_phase(state: GraphState) -> str:
+    """根据当前 phase 选择对话代理节点。"""
+    if state.get("phase") == "combat" and state.get("combat"):
+        return COMBAT_ASSISTANT_NODE
+    return ASSISTANT_NODE
+
+
+def _is_combat_active(state: GraphState) -> bool:
+    return state.get("phase") == "combat" and state.get("combat") is not None
 
 
 def route_from_router(state: GraphState) -> str:
@@ -23,10 +35,18 @@ def route_from_router(state: GraphState) -> str:
     messages = state.get("messages", [])
     if not messages:
         return END_NODE
-    return ASSISTANT_NODE
+    return _assistant_node_for_phase(state)
 
 
 def route_from_assistant(state: GraphState) -> str:
+    return _route_after_assistant_message(state)
+
+
+def route_from_combat_assistant(state: GraphState) -> str:
+    return _route_after_assistant_message(state)
+
+
+def _route_after_assistant_message(state: GraphState) -> str:
     messages = state.get("messages", [])
     if not messages:
         return END_NODE
@@ -35,12 +55,12 @@ def route_from_assistant(state: GraphState) -> str:
     if isinstance(last_message, AIMessage) and last_message.tool_calls:
         return TOOL_NODE
 
-    # [修改]：如果本轮后确认无需执行工具指令，检查上下文，判断是否由于消息过多需触发截断与大纲总结。
-    # 放大触发阈值。TRPG 需要保留相对充沛的短期精细记忆。
-    # 阈值设定为 > 40 条，即大约允许滑动窗口在 20~40 条之间移动。
-    if len(messages) > 40:
+    # 长期记忆管理：消息超过 60 条时触发摘要压缩。
+    # 短期窗口（_trim_model_messages）已确保 LLM 每次只看最近 50/32 条。
+    # 此处设定阈值高于窗口大小，避免频繁打断。只在真正"过多"时压缩。
+    if len(messages) > 60:
         return SUMMARIZE_NODE
-        
+
     return END_NODE
 
 
@@ -66,34 +86,35 @@ def _is_monster_turn(state: GraphState) -> bool:
 
 
 def route_from_tool(state: GraphState) -> str:
-    """工具执行后：若当前轮到怪物行动 → 进入自动战斗节点；否则回 LLM"""
-    if _is_monster_turn(state):
-        return MONSTER_COMBAT_NODE
-    return ASSISTANT_NODE
-
-
-def route_from_monster_combat(state: GraphState) -> str:
-    """怪物单步执行后：下一个仍是怪物 → 继续循环；轮到玩家 → 回 LLM 叙述"""
+    """工具执行后：战斗态统一回 combat assistant，待决反应除外。"""
     if state.get("pending_reaction"):
         return END_NODE
-    if _is_monster_turn(state):
-        return MONSTER_COMBAT_NODE
-    return ASSISTANT_NODE
+    if _is_combat_active(state):
+        return COMBAT_RESOLUTION_NODE
+    return _assistant_node_for_phase(state)
+
+
+def route_from_combat_resolution(state: GraphState) -> str:
+    """战斗后置收束：团灭/恢复在此完成，其余情况回到 phase 对应 assistant。"""
+    if state.get("pending_reaction"):
+        return END_NODE
+    return _assistant_node_for_phase(state)
 
 
 def route_from_reaction_resolution(state: GraphState) -> str:
-    """反应解析后：若仍存在待决反应则暂停，否则按当前行动者继续路由"""
+    """反应解析后：若仍存在待决反应则暂停，否则统一交回 phase 对应 assistant。"""
     if state.get("pending_reaction"):
         return END_NODE
-    if _is_monster_turn(state):
-        return MONSTER_COMBAT_NODE
-    return ASSISTANT_NODE
+    if _is_combat_active(state):
+        return COMBAT_RESOLUTION_NODE
+    return _assistant_node_for_phase(state)
 
 
 ROUTE_OPTIONS = {
     ASSISTANT_NODE: ASSISTANT_NODE,
+    COMBAT_ASSISTANT_NODE: COMBAT_ASSISTANT_NODE,
+    COMBAT_RESOLUTION_NODE: COMBAT_RESOLUTION_NODE,
     TOOL_NODE: TOOL_NODE,
-    MONSTER_COMBAT_NODE: MONSTER_COMBAT_NODE,
     REACTION_RESOLUTION_NODE: REACTION_RESOLUTION_NODE,
     END_NODE: END_NODE,
 }

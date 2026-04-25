@@ -13,7 +13,6 @@ from langgraph.types import Command
 
 from app.config.settings import settings
 from app.graph.builder import build_graph
-from app.graph.constants import ASSISTANT_NODE, MONSTER_COMBAT_NODE, TOOL_NODE
 from app.memory.checkpointer import close_checkpointer, get_checkpointer
 
 
@@ -175,6 +174,14 @@ class ChatSessionService:
 
         return None
 
+    def _is_hidden_tool_message(self, msg: Any) -> bool:
+        """内部 ToolMessage 仅用于满足 ToolNode 约束，不应直接透传到前端聊天流。"""
+        return bool(
+            hasattr(msg, "additional_kwargs")
+            and isinstance(msg.additional_kwargs, dict)
+            and msg.additional_kwargs.get("hidden_from_ui")
+        )
+
     def _sse_event(self, event_type: str, data: Any) -> str:
         """格式化单条 SSE 事件"""
         return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -226,6 +233,9 @@ class ChatSessionService:
                         yield self._sse_event("assistant_message", {"content": content})
 
                     elif isinstance(msg, ToolMessage):
+                        if self._is_hidden_tool_message(msg):
+                            continue
+
                         payload: dict = {"content": msg.content}
                         
                         # 拦截掷骰子工具投出的自然值（普通的掷骰请求在 content 格式中解析，如果是带有 artifact 的也能取）

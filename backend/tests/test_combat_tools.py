@@ -238,6 +238,42 @@ class TestAttackActionValidation:
         msg_content = result.update["messages"][0].content
         assert "攻击" in msg_content
 
+    def test_monster_attack_returns_pending_reaction_snapshot_when_reaction_available(self):
+        """怪物攻击命中玩家且存在可用反应时，只写入 pending_reaction，不提前结算伤害。"""
+        state = self._build_state(current_actor_id="goblin_1")
+        roll_info = {
+            "blocked": False,
+            "emit_dice_roll": True,
+            "hit": True,
+            "crit": False,
+            "natural": 12,
+            "raw_roll": 12,
+            "attack_bonus": 4,
+            "hit_total": 16,
+            "target_ac": 12,
+            "dmg_dice": "1d6+2",
+            "dmg_type": "slashing",
+            "atk_name_display": "Scimitar",
+            "advantage_used": "normal",
+            "deflected": False,
+            "lines": ["Goblin 使用 [Scimitar] 攻击 预设-战士!", "命中骰: 1d20+4 vs AC 12"],
+        }
+
+        with patch("app.services.tools.combat_tools.roll_attack_hit", return_value=roll_info), patch(
+            "app.services.tools.combat_tools.get_available_reactions",
+            return_value=[{"spell_id": "shield", "name_cn": "护盾术", "min_slot": 1}],
+        ):
+            result = self._invoke_attack(state, "goblin_1", "player_预设-战士")
+
+        assert isinstance(result, Command)
+        assert result.update["pending_reaction"]["attacker_id"] == "goblin_1"
+        assert result.update["pending_reaction"]["target_id"] == "player_预设-战士"
+        assert result.update["pending_reaction"]["attack_roll"]["hit_total"] == 16
+        assert result.update["reaction_choice"] is None
+        assert result.update["messages"][0].additional_kwargs["hidden_from_ui"] is True
+        assert "hp_changes" not in result.update
+        assert result.update["player"]["hp"] == state["player"]["hp"]
+
 
 # ── Phase 4: next_turn 重置动作资源 ──────────────────────────────
 
@@ -430,13 +466,20 @@ class TestReactionFlow:
         return {"combat": combat, "player": player}
 
     def test_monster_hit_creates_pending_reaction(self):
-        from app.graph import nodes
+        from app.services.tool_service import attack_action
 
         state = self._build_reaction_state()
         with patch("app.services.tools._helpers.d20.roll", side_effect=self._fixed_roll), patch(
             "app.services.tools._helpers._get_natural_d20", return_value=12
         ):
-            result = nodes.monster_combat_node(state)
+            result = _invoke_tool(
+                attack_action,
+                tool_input={
+                    "attacker_id": "goblin_1",
+                    "target_id": state["player"]["id"],
+                    "state": state,
+                },
+            ).update
 
         pending = result["pending_reaction"]
         assert pending["type"] == "reaction_prompt"
@@ -445,16 +488,24 @@ class TestReactionFlow:
         assert pending["attack_roll"]["attack_bonus"] == 4
         assert pending["attack_roll"]["hit_total"] == 16
         assert pending["available_reactions"][0]["spell_id"] == "shield"
-        assert "messages" not in result
+        assert result["messages"][0].additional_kwargs["hidden_from_ui"] is True
 
     def test_shield_reaction_uses_saved_attack_snapshot_and_prevents_damage(self):
         from app.graph import nodes
+        from app.services.tool_service import attack_action
 
         state = self._build_reaction_state()
         with patch("app.services.tools._helpers.d20.roll", side_effect=self._fixed_roll), patch(
             "app.services.tools._helpers._get_natural_d20", return_value=12
         ):
-            pending_state = nodes.monster_combat_node(state)
+            pending_state = _invoke_tool(
+                attack_action,
+                tool_input={
+                    "attacker_id": "goblin_1",
+                    "target_id": state["player"]["id"],
+                    "state": state,
+                },
+            ).update
             initial_slots = pending_state["player"]["resources"]["spell_slot_lv1"]
             resolved = nodes.resolve_reaction_node({
                 "combat": pending_state["combat"],
@@ -478,12 +529,20 @@ class TestReactionFlow:
 
     def test_skip_reaction_keeps_original_damage_roll(self):
         from app.graph import nodes
+        from app.services.tool_service import attack_action
 
         state = self._build_reaction_state()
         with patch("app.services.tools._helpers.d20.roll", side_effect=self._fixed_roll), patch(
             "app.services.tools._helpers._get_natural_d20", return_value=12
         ):
-            pending_state = nodes.monster_combat_node(state)
+            pending_state = _invoke_tool(
+                attack_action,
+                tool_input={
+                    "attacker_id": "goblin_1",
+                    "target_id": state["player"]["id"],
+                    "state": state,
+                },
+            ).update
             resolved = nodes.resolve_reaction_node({
                 "combat": pending_state["combat"],
                 "player": pending_state["player"],
@@ -513,7 +572,7 @@ class TestConditionLifecycleHooks:
         return TestConditionLifecycleHooks._real_roll(mapping.get(normalized, expr))
 
     def test_paralyzed_monster_turn_does_not_attach_attack_roll_payload(self):
-        from app.graph import nodes
+        from app.services.tool_service import attack_action
 
         player = _make_player_combatant("战士")
         goblin = _make_goblin()
@@ -524,11 +583,18 @@ class TestConditionLifecycleHooks:
             player_dict=player,
         )
 
-        result = nodes.monster_combat_node({"combat": combat, "player": player})
+        result = _invoke_tool(
+            attack_action,
+            tool_input={
+                "attacker_id": "goblin_1",
+                "target_id": player["id"],
+                "state": {"combat": combat, "player": player},
+            },
+        ).update
 
         message = result["messages"][0]
         assert "无法行动" in message.content
-        assert not message.additional_kwargs.get("attack_roll")
+        assert not getattr(message, "additional_kwargs", {}).get("attack_roll")
 
     def test_mirror_image_deflection_runs_via_condition_hook(self):
         from app.services.tools._helpers import roll_attack_hit

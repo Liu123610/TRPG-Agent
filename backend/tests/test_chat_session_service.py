@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from uuid import UUID
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.services.chat_session_service import ChatSessionService
 
@@ -54,6 +54,31 @@ class ChatSessionServiceTests(unittest.IsolatedAsyncioTestCase):
 
         UUID(result["session_id"])
         self.assertEqual(result["session_id"], graph.last_config["configurable"]["thread_id"])
+
+    async def test_get_history_keeps_original_transcript_without_tool_placeholders(self):
+        graph = FakeGraph({"messages": []})
+        graph.values = {
+            "messages": [
+                HumanMessage(content="我攻击哥布林"),
+                AIMessage(content="", tool_calls=[{"name": "attack_action", "args": {"attacker_id": "player_hero"}, "id": "call_1"}]),
+                ToolMessage(content="Goblin 使用 [Scimitar] 攻击 英雄!\n英雄 HP: 18 → 13", tool_call_id="call_1", name="attack_action"),
+                HumanMessage(content="[系统:怪物行动]\n你放弃了反应。"),
+                AIMessage(content="哥布林被你逼退了半步。", tool_calls=[]),
+            ]
+        }
+        service = ChatSessionService(graph=graph)
+
+        history = await service.get_history(session_id="demo", limit=10)
+
+        self.assertEqual(
+            [
+                {"role": "user", "content": "我攻击哥布林"},
+                {"role": "assistant", "content": "哥布林被你逼退了半步。"},
+            ],
+            history["messages"],
+        )
+        self.assertFalse(any("[工具:" in item["content"] for item in history["messages"]))
+        self.assertFalse(any("实时系统监控窗" in item["content"] for item in history["messages"]))
 
 
 if __name__ == "__main__":

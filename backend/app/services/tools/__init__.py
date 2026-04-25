@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from langchain_core.tools import BaseTool
 
@@ -46,25 +47,53 @@ from app.services.tools.reactions import (
 # 向后兼容旧名称
 build_player_combatant = prepare_player_for_combat
 
+ToolProfile = Literal["narrative", "combat"]
+
+_NARRATIVE_TOOLS: tuple[BaseTool, ...] = (
+    weather,
+    request_dice_roll,
+    load_character_profile,
+    modify_character_state,
+    spawn_monsters,
+    start_combat,
+    end_combat,
+    clear_dead_units,
+    cast_spell,
+    inspect_unit,
+    apply_condition,
+    remove_condition,
+    grant_xp,
+    level_up,
+    choose_arcane_tradition,
+)
+
+_COMBAT_TOOLS: tuple[BaseTool, ...] = (
+    request_dice_roll,
+    modify_character_state,
+    attack_action,
+    next_turn,
+    end_combat,
+    cast_spell,
+    inspect_unit,
+    apply_condition,
+    remove_condition,
+)
+
+_ALL_TOOLS: tuple[BaseTool, ...] = _NARRATIVE_TOOLS + tuple(
+    tool for tool in _COMBAT_TOOLS if tool not in _NARRATIVE_TOOLS
+)
+
+
+# 模型只看 profile，ToolNode 仍保留全量工具以执行历史调用。
+@lru_cache(maxsize=None)
+def get_tool_profile(profile: ToolProfile) -> list[BaseTool]:
+    if profile == "narrative":
+        return list(_NARRATIVE_TOOLS)
+    if profile == "combat":
+        return list(_COMBAT_TOOLS)
+    raise ValueError(f"Unknown tool profile: {profile}")
+
 
 @lru_cache(maxsize=1)
 def get_tools() -> list[BaseTool]:
-    return [
-        weather,
-        request_dice_roll,
-        load_character_profile,
-        modify_character_state,
-        spawn_monsters,
-        start_combat,
-        attack_action,
-        next_turn,
-        end_combat,
-        clear_dead_units,
-        cast_spell,
-        inspect_unit,
-        apply_condition,
-        remove_condition,
-        grant_xp,
-        level_up,
-        choose_arcane_tradition,
-    ]
+    return list(_ALL_TOOLS)

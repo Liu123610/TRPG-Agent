@@ -1,10 +1,15 @@
 """LLM service with LangChain ChatOpenAI and native tool-calling support."""
 
+from typing import Literal
+
 from openai import APITimeoutError, APIConnectionError, BadRequestError
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from app.config.settings import settings
+
+
+LLMMode = Literal["narrative", "combat"]
 
 
 class LLMService:
@@ -30,21 +35,29 @@ class LLMService:
             max_retries=settings.llm_max_retries,
         )
 
+    # 中文注释：先保留单客户端实现，把 mode 作为稳定接口，后续可无痛分模型。
+    def _get_client_for_mode(self, mode: LLMMode) -> ChatOpenAI:
+        if mode not in {"narrative", "combat"}:
+            raise ValueError(f"Unsupported LLM mode: {mode}")
+        return self._client
+
     def invoke_with_tools(
         self,
         messages: list[BaseMessage],
         tools: list,
         system_prompt: str,
+        mode: LLMMode = "narrative",
     ) -> AIMessage:
         try:
             prompt_messages = [SystemMessage(content=system_prompt), *messages]
+            client = self._get_client_for_mode(mode)
 
             # 仅在存在可用工具时启用 tool-calling，避免向上游发送空 tools 数组触发 400。
             if tools:
-                runnable = self._client.bind_tools(tools)
+                runnable = client.bind_tools(tools)
                 response = runnable.invoke(prompt_messages)
             else:
-                response = self._client.invoke(prompt_messages)
+                response = client.invoke(prompt_messages)
 
             if isinstance(response, AIMessage):
                 return response

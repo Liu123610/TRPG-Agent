@@ -206,6 +206,25 @@ def build_attack_roll_event_payload(roll_info: dict) -> dict | None:
     }
 
 
+def build_pending_reaction_state(
+    attacker: dict,
+    target: dict,
+    roll_info: dict,
+    available_reactions: list[dict],
+) -> dict:
+    """统一固化一次待决反应的攻击快照，保证工具流与怪物执行器使用同一结构。"""
+    return {
+        "type": "reaction_prompt",
+        "trigger": "on_hit",
+        "attacker_id": attacker.get("id", ""),
+        "attacker_name": attacker.get("name", ""),
+        "target_id": target.get("id", ""),
+        "target_name": target.get("name", ""),
+        "attack_roll": dict(roll_info),
+        "available_reactions": list(available_reactions),
+    }
+
+
 # ── 攻击解算 ────────────────────────────────────────────────────
 
 

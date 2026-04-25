@@ -1,13 +1,15 @@
 ﻿"""Graph node function implementations."""
 
 import json
+from copy import copy
 from functools import lru_cache
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, RemoveMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, ToolMessage
 
+from app.graph.constants import COMBAT_AGENT_MODE, NARRATIVE_AGENT_MODE
 from app.graph.state import GraphState
 from app.services.llm_service import LLMService
-from app.services.tool_service import get_tools
+from app.services.tool_service import get_tool_profile
 
 ASSISTANT_SYSTEM_PROMPT = (
     "你是一个专业的 TRPG 游戏核心主持人（DM/GM）。"
@@ -43,6 +45,17 @@ ASSISTANT_SYSTEM_PROMPT = (
     "使用 modify_character_state 的 resource_delta 或 set_resource 键。\n"
 )
 
+COMBAT_ASSISTANT_SYSTEM_PROMPT = (
+    ASSISTANT_SYSTEM_PROMPT
+    + "\n"
+    + "【战斗代理补充准则】\n"
+    + "1. 你负责战斗阶段所有单位的回合决策与简洁播报，不要展开长篇剧情描写。\n"
+    + "2. 当上一条是工具或系统战报时，先吸收其中的命中、伤害、状态变化，再决定是否继续调用工具。\n"
+    + "3. 当当前行动者是怪物或 NPC 时，你必须直接代表它完成合法回合，不要先向玩家提问。\n"
+    + "4. 若当前行动者无法再执行有效动作，优先调用 next_turn，而不是停留在空泛描述。\n"
+    + "5. 若战斗已经结束或 combat 为空，立即回到正常叙事口吻，不要继续以战斗代理自居。\n"
+)
+
 
 @lru_cache(maxsize=1)
 def _get_llm_service() -> LLMService:
@@ -55,106 +68,313 @@ def router_node(state: GraphState) -> dict:
     return {}
 
 
+# 兼容旧入口，探索阶段仍沿用 assistant 节点名。
 def assistant_node(state: GraphState) -> dict:
-    messages = state.get("messages", [])
-    
-    # 动态组装附加了上下文的 System Prompt
-    system_prompt = ASSISTANT_SYSTEM_PROMPT
+    return _invoke_assistant(state, mode=NARRATIVE_AGENT_MODE)
 
-    # 注入历史归纳大纲，保持大模型宏观长时记忆
-    if summary := state.get("conversation_summary"):
-        system_prompt += f"\n\n[前情提要（必须铭记的游戏大纲）]\n{summary}"
 
-    hud_text = ""
-    if player := state.get("player"):
-        player_context = json.dumps(player, ensure_ascii=False, indent=2)
-        hud_text += f"\n\n[当前玩家状态]\n{player_context}"
-    else:
-        hud_text += "\n\n[当前玩家状态]\n玩家尚未加载或创建角色卡。"
+# 战斗阶段统一入口，玩家与怪物回合都走同一 combat assistant。
+def combat_assistant_node(state: GraphState) -> dict:
+    return _invoke_assistant(state, mode=COMBAT_AGENT_MODE)
 
-    # 注入战斗态势，让 LLM 知道当前行动者、各单位 HP 与可用攻击
-    if combat := state.get("combat"):
-        combat_data = combat.model_dump() if hasattr(combat, "model_dump") else dict(combat)
-        current_id = combat_data.get("current_actor_id", "")
-        participants = dict(combat_data.get("participants", {}))
 
-        # 将玩家纳入 HUD 显示（玩家不在 participants 中，但是参战者）
-        if player := state.get("player"):
-            pd = player.model_dump() if hasattr(player, "model_dump") else dict(player)
-            if pd.get("id"):
-                participants[pd["id"]] = pd
-
-        combat_lines = [
-            f"第 {combat_data.get('round', '?')} 回合 | 当前行动者: {current_id}",
-            f"先攻顺序: {combat_data.get('initiative_order', [])}",
-        ]
-        for uid, p in participants.items():
-            attacks_desc = ", ".join(a.get("name", "?") for a in p.get("attacks", []))
-            marker = " ← 当前行动" if uid == current_id else ""
-            combat_lines.append(
-                f"  {p.get('name', uid)} [ID:{uid}] side={p.get('side')} "
-                f"HP:{p.get('hp')}/{p.get('max_hp')} AC:{p.get('ac')} "
-                f"attacks=[{attacks_desc}]{marker}"
-            )
-        hud_text += "\n\n[当前战斗状态]\n" + "\n".join(combat_lines)
-
-    # 注入场景单位池，让 LLM 知道可用战斗单位
-    if scene_units := state.get("scene_units"):
-        scene_data = {k: v.model_dump() if hasattr(v, "model_dump") else dict(v) for k, v in scene_units.items()} if hasattr(scene_units, "items") else scene_units
-        if scene_data:
-            scene_lines = [f"  {uid}: {p.get('name', uid)} (side={p.get('side')}, HP:{p.get('hp')}/{p.get('max_hp')})" for uid, p in scene_data.items()]
-            hud_text += "\n\n[场景单位池（可用 start_combat 指定参战）]\n" + "\n".join(scene_lines)
-
-    # 注入死亡单位档案
-    if dead_units := state.get("dead_units"):
-        dead_data = {k: v.model_dump() if hasattr(v, "model_dump") else dict(v) for k, v in dead_units.items()} if hasattr(dead_units, "items") else dead_units
-        if dead_data:
-            dead_lines = [f"  {uid}: {p.get('name', uid)}" for uid, p in dead_data.items()]
-            hud_text += "\n\n[死亡单位档案]\n" + "\n".join(dead_lines)
-
-    hud_text = "\n\n=== 实时系统监控窗(HUD) ===\n" + hud_text.strip() + "\n===========================\n"
-
-    invoke_messages = list(messages)
-    if invoke_messages:
-        import copy
-        last_msg = invoke_messages[-1]
-        modified_msg = copy.copy(last_msg)
-        
-        if isinstance(modified_msg.content, str):
-            modified_msg.content = modified_msg.content + hud_text
-        elif isinstance(modified_msg.content, list):
-            modified_msg.content.append({"type": "text", "text": hud_text})
-            
-        invoke_messages[-1] = modified_msg
-
+def _invoke_assistant(state: GraphState, mode: str) -> dict:
     from app.utils.logger import logger
-    logger.info("=== [Assistant Node Invocation] ===")
-    logger.debug(f"HUD Info [injected into latest message]:\n{hud_text}")
-    
-    # Elegant formatting for Dialogue History / Tool Returns
-    logger.debug("--- [Message Dialogue & Context History] ---")
-    for i, msg in enumerate(invoke_messages):
+
+    model_input_messages = _build_model_input_messages(state, mode)
+    hud_text = _build_hud_text(state)
+    system_prompt = _build_system_prompt(state, mode)
+    tools = get_tool_profile(mode)
+
+    logger.info("=== [%s Assistant Invocation] ===", mode)
+    logger.debug("HUD Info [injected into latest message]:\n%s", hud_text)
+    logger.debug("--- [Projected Message Dialogue & Context History] ---")
+    for i, msg in enumerate(model_input_messages):
         msg_type = msg.__class__.__name__
-        content_preview = str(msg.content)[:200] + "..." if len(str(msg.content)) > 200 else msg.content
-        logger.debug(f"Msg {i} [{msg_type}]: {content_preview}")
+        content_text = _message_content_to_text(msg.content)
+        content_preview = content_text[:200] + "..." if len(content_text) > 200 else content_text
+        logger.debug("Msg %s [%s]: %s", i, msg_type, content_preview)
 
     response = _get_llm_service().invoke_with_tools(
-        messages=invoke_messages,
-        tools=get_tools(),
+        messages=model_input_messages,
+        tools=tools,
         system_prompt=system_prompt,
+        mode=mode,
     )
-    
+
     if hasattr(response, "tool_calls") and response.tool_calls:
-        logger.info(f"LLM Called Tools -> {response.tool_calls}")
+        logger.info("LLM Called Tools -> %s", response.tool_calls)
     else:
-        info_resp = str(getattr(response, 'content', ''))[:100]
-        logger.info(f"LLM Responsed [Text] -> {info_resp}...")
+        info_resp = str(getattr(response, "content", ""))[:100]
+        logger.info("LLM Responsed [Text] -> %s...", info_resp)
 
     output = response.content if isinstance(response.content, str) and not response.tool_calls else ""
     return {
         "messages": [response],
         "output": output,
     }
+
+
+def _build_system_prompt(state: GraphState, mode: str) -> str:
+    system_prompt = COMBAT_ASSISTANT_SYSTEM_PROMPT if mode == COMBAT_AGENT_MODE else ASSISTANT_SYSTEM_PROMPT
+
+    if summary := state.get("conversation_summary"):
+        system_prompt += f"\n\n[前情提要（必须铭记的游戏大纲）]\n{summary}"
+
+    if mode == COMBAT_AGENT_MODE:
+        combat_brief = _build_combat_brief(state)
+        if combat_brief:
+            system_prompt += f"\n\n[战斗简报]\n{combat_brief}"
+
+        turn_directive = _build_combat_turn_directive(state)
+        if turn_directive:
+            system_prompt += f"\n\n[当前回合指令]\n{turn_directive}"
+
+    return system_prompt
+
+
+def _build_combat_brief(state: GraphState) -> str:
+    combat_dict = _state_value_to_dict(state.get("combat"))
+    if not combat_dict:
+        return ""
+
+    player_dict = _state_value_to_dict(state.get("player"))
+    participants = dict(combat_dict.get("participants", {}))
+    if player_dict and player_dict.get("id"):
+        participants[player_dict["id"]] = player_dict
+
+    current_id = combat_dict.get("current_actor_id", "")
+    current_actor = participants.get(current_id, {})
+    lines = [
+        f"第 {combat_dict.get('round', '?')} 回合，当前行动者 {current_actor.get('name', current_id)} [ID:{current_id}]。",
+        f"先攻顺序: {combat_dict.get('initiative_order', [])}",
+    ]
+
+    if scene_summary := state.get("scene_summary"):
+        lines.append(f"当前局势/战斗 stakes: {scene_summary}")
+
+    player_side: list[str] = []
+    enemy_side: list[str] = []
+    for uid, combatant in participants.items():
+        status = (
+            f"{combatant.get('name', uid)}[HP:{combatant.get('hp')}/{combatant.get('max_hp')}, "
+            f"AC:{combatant.get('ac')}, conditions:{_format_conditions(combatant)}, "
+            f"attacks:{_format_attacks(combatant)}]"
+        )
+        if combatant.get("side") == "player":
+            player_side.append(status)
+        else:
+            enemy_side.append(status)
+
+    if player_side:
+        lines.append("玩家侧: " + "；".join(player_side))
+    if enemy_side:
+        lines.append("对立侧: " + "；".join(enemy_side))
+
+    return "\n".join(lines)
+
+
+def _build_combat_turn_directive(state: GraphState) -> str:
+    """用共享状态显式说明当前回合由谁决策，避免在单线程里隐式切换职责。"""
+    combat_dict = _state_value_to_dict(state.get("combat"))
+    if not combat_dict:
+        return ""
+
+    player_dict = _state_value_to_dict(state.get("player"))
+    current_id = combat_dict.get("current_actor_id", "")
+    participants = dict(combat_dict.get("participants", {}))
+    if player_dict and player_dict.get("id"):
+        participants[player_dict["id"]] = player_dict
+
+    current_actor = participants.get(current_id, {})
+    current_name = current_actor.get("name", current_id)
+    if current_actor.get("side") == "player":
+        return (
+            f"当前是玩家单位 {current_name} [ID:{current_id}] 的回合。"
+            "根据玩家最新意图调用合适工具；若本回合已无合理动作，再调用 next_turn。"
+        )
+
+    return (
+        f"当前是怪物/NPC {current_name} [ID:{current_id}] 的回合。"
+        "你必须直接为其选择一个合法目标和攻击或法术并调用工具；"
+        "若动作已用尽、被状态阻止，或已无存活敌人，则立即调用 next_turn。"
+    )
+
+
+def _build_hud_text(state: GraphState) -> str:
+    sections: list[str] = []
+
+    player_dict = _state_value_to_dict(state.get("player"))
+    if player_dict:
+        sections.append("[当前玩家状态]\n" + json.dumps(player_dict, ensure_ascii=False, indent=2))
+    else:
+        sections.append("[当前玩家状态]\n玩家尚未加载或创建角色卡。")
+
+    combat_dict = _state_value_to_dict(state.get("combat"))
+    if combat_dict:
+        current_id = combat_dict.get("current_actor_id", "")
+        participants = dict(combat_dict.get("participants", {}))
+        if player_dict and player_dict.get("id"):
+            participants[player_dict["id"]] = player_dict
+
+        combat_lines = [
+            f"第 {combat_dict.get('round', '?')} 回合 | 当前行动者: {current_id}",
+            f"先攻顺序: {combat_dict.get('initiative_order', [])}",
+        ]
+        for uid, combatant in participants.items():
+            attacks_desc = _format_attacks(combatant)
+            marker = " ← 当前行动" if uid == current_id else ""
+            combat_lines.append(
+                f"  {combatant.get('name', uid)} [ID:{uid}] side={combatant.get('side')} "
+                f"HP:{combatant.get('hp')}/{combatant.get('max_hp')} AC:{combatant.get('ac')} "
+                f"conditions=[{_format_conditions(combatant)}] attacks=[{attacks_desc}]{marker}"
+            )
+        sections.append("[当前战斗状态]\n" + "\n".join(combat_lines))
+
+    scene_units = state.get("scene_units")
+    scene_data = _dump_mapping_state(scene_units)
+    if scene_data:
+        scene_lines = [
+            f"  {uid}: {unit.get('name', uid)} (side={unit.get('side')}, HP:{unit.get('hp')}/{unit.get('max_hp')})"
+            for uid, unit in scene_data.items()
+        ]
+        sections.append("[场景单位池（可用 start_combat 指定参战）]\n" + "\n".join(scene_lines))
+
+    dead_units = state.get("dead_units")
+    dead_data = _dump_mapping_state(dead_units)
+    if dead_data:
+        dead_lines = [f"  {uid}: {unit.get('name', uid)}" for uid, unit in dead_data.items()]
+        sections.append("[死亡单位档案]\n" + "\n".join(dead_lines))
+
+    return "\n\n=== 实时系统监控窗(HUD) ===\n" + "\n\n".join(sections) + "\n===========================\n"
+
+
+def _dump_mapping_state(value) -> dict:
+    if not value or not hasattr(value, "items"):
+        return {}
+    return {
+        key: item.model_dump() if hasattr(item, "model_dump") else dict(item)
+        for key, item in value.items()
+    }
+
+
+def _build_model_input_messages(state: GraphState, mode: str) -> list[BaseMessage]:
+    source_messages = list(state.get("messages", []))
+    trimmed_messages = _trim_model_messages(source_messages, mode)
+    projected_messages: list[BaseMessage] = []
+
+    for message in trimmed_messages:
+        if isinstance(message, ToolMessage):
+            projected_messages.append(_clone_message_with_content(message, _summarize_tool_message(message)))
+            continue
+
+        if isinstance(message, HumanMessage) and isinstance(message.content, str) and message.content.startswith("[系统:"):
+            projected_messages.append(_clone_message_with_content(message, _summarize_system_message(message.content)))
+            continue
+
+        projected_messages.append(message)
+
+    return _append_hud_to_latest_message(projected_messages, _build_hud_text(state))
+
+
+def _trim_model_messages(messages: list[BaseMessage], mode: str) -> list[BaseMessage]:
+    keep_count = 50 if mode == NARRATIVE_AGENT_MODE else 32
+    if len(messages) <= keep_count:
+        return list(messages)
+
+    start_index = len(messages) - keep_count
+    while start_index > 0 and isinstance(messages[start_index], ToolMessage):
+        start_index -= 1
+
+    return list(messages[start_index:])
+
+
+def _append_hud_to_latest_message(messages: list[BaseMessage], hud_text: str) -> list[BaseMessage]:
+    if not messages:
+        return []
+
+    projected_messages = list(messages)
+    projected_messages[-1] = _clone_message_with_content(projected_messages[-1], _append_text_content(projected_messages[-1].content, hud_text))
+    return projected_messages
+
+
+def _clone_message_with_content(message: BaseMessage, content) -> BaseMessage:
+    cloned_message = copy(message)
+    cloned_message.content = content
+    return cloned_message
+
+
+def _append_text_content(content, extra_text: str):
+    if isinstance(content, str):
+        return content + extra_text
+    if isinstance(content, list):
+        appended_content = list(content)
+        appended_content.append({"type": "text", "text": extra_text})
+        return appended_content
+    return f"{content}{extra_text}"
+
+
+def _message_content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("text"):
+                parts.append(str(item["text"]))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    return str(content)
+
+
+def _format_conditions(combatant: dict) -> str:
+    conditions = combatant.get("conditions", []) or []
+    if not conditions:
+        return "无"
+    return ", ".join(condition.get("name_cn") or condition.get("id", "?") for condition in conditions)
+
+
+def _format_attacks(combatant: dict) -> str:
+    attacks = combatant.get("attacks", []) or []
+    if not attacks:
+        return "无"
+    return ", ".join(attack.get("name", "?") for attack in attacks)
+
+
+def _summarize_tool_message(message: ToolMessage) -> str:
+    tool_name = getattr(message, "name", "") or "tool"
+    raw_text = _message_content_to_text(message.content).strip()
+
+    if tool_name == "request_dice_roll":
+        try:
+            roll_data = json.loads(raw_text)
+        except json.JSONDecodeError:
+            roll_data = None
+        if isinstance(roll_data, dict):
+            raw_roll = roll_data.get("raw_roll", "?")
+            final_total = roll_data.get("final_total", raw_roll)
+            return f"[工具:{tool_name}] 掷骰结果 raw={raw_roll} total={final_total}"
+
+    summary_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    max_lines = 3 if tool_name in {"attack_action", "cast_spell"} else 2
+    summary = " | ".join(summary_lines[:max_lines])
+    if not summary:
+        summary = raw_text[:180] or "工具已执行。"
+    if len(summary) > 180:
+        summary = summary[:177] + "..."
+    return f"[工具:{tool_name}] {summary}"
+
+
+def _summarize_system_message(content: str) -> str:
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    head = lines[0] if lines else "[系统]"
+    body = " | ".join(lines[1:3])
+    if body:
+        return f"{head} {body}"
+    return head
 
 
 def summarize_conversation_node(state: GraphState) -> dict:
@@ -225,20 +445,6 @@ def _state_value_to_dict(value):
     return dict(value)
 
 
-def _build_pending_reaction(actor: dict, target: dict, roll_info: dict, available: list[dict]) -> dict:
-    """把一次待决反应所需的全部事实快照固化进状态。"""
-    return {
-        "type": "reaction_prompt",
-        "trigger": "on_hit",
-        "attacker_id": actor.get("id", ""),
-        "attacker_name": actor.get("name", ""),
-        "target_id": target.get("id", ""),
-        "target_name": target.get("name", ""),
-        "attack_roll": dict(roll_info),
-        "available_reactions": list(available),
-    }
-
-
 def _all_players_down(combat_dict: dict, player_dict: dict | None) -> bool:
     """检查战场上是否已不存在存活的玩家单位。"""
     from app.services.tools._helpers import get_all_combatants
@@ -250,40 +456,9 @@ def _all_players_down(combat_dict: dict, player_dict: dict | None) -> bool:
     return all(unit.get("hp", 0) <= 0 for unit in player_units)
 
 
-def _finalize_monster_combat_state(
-    combat_dict: dict,
-    player_dict: dict | None,
-    log_lines: list[str],
-    hp_changes: list[dict],
-    attack_roll: dict | None = None,
-) -> dict:
-    """统一封装怪物战斗结算输出，兼顾玩家倒地中断与命中骰展示。"""
-    from langgraph.types import interrupt
+def _build_combat_system_message(log_lines: list[str], attack_roll: dict | None = None) -> HumanMessage:
+    """把节点内的怪物/反应结算统一投影成系统战报消息。"""
     from app.services.tools._helpers import build_attack_roll_event_payload
-
-    if _all_players_down(combat_dict, player_dict):
-        combat_report = "[系统:怪物行动]\n" + "\n".join(log_lines)
-        user_choice = interrupt({
-            "type": "player_death",
-            "summary": combat_report,
-            "hp_changes": hp_changes,
-        })
-
-        if player_dict:
-            if user_choice == "revive":
-                player_dict["hp"] = max(1, player_dict.get("max_hp", 1) // 2)
-            else:
-                player_dict["hp"] = 0
-
-        return {
-            "combat": None,
-            "player": player_dict,
-            "phase": "exploration",
-            "messages": [HumanMessage(content="[系统] 玩家角色倒下，战斗结束。")],
-            "hp_changes": [],
-            "pending_reaction": None,
-            "reaction_choice": None,
-        }
 
     combat_report = "[系统:怪物行动]\n" + "\n".join(log_lines)
     message_kwargs = {}
@@ -293,12 +468,47 @@ def _finalize_monster_combat_state(
             message_kwargs["additional_kwargs"] = {
                 "attack_roll": attack_roll_payload,
             }
-    msg = HumanMessage(content=combat_report, **message_kwargs)
+    return HumanMessage(content=combat_report, **message_kwargs)
+
+
+def _build_player_death_summary(messages: list[BaseMessage]) -> str:
+    """玩家团灭时优先复用最近一次真实战报，而不是再造一份占位文本。"""
+    for message in reversed(messages):
+        content = _message_content_to_text(getattr(message, "content", "")).strip()
+        if content:
+            return content
+    return "[系统:怪物行动]\n所有玩家单位已倒下！"
+
+
+def combat_resolution_node(state: GraphState) -> dict:
+    """战斗后置收束节点：统一处理玩家团灭 interrupt，不再依赖旧 monster 节点。"""
+    from langgraph.types import interrupt
+
+    combat_dict = _state_value_to_dict(state.get("combat"))
+    if not combat_dict:
+        return {}
+
+    player_dict = _state_value_to_dict(state.get("player"))
+    if not _all_players_down(combat_dict, player_dict):
+        return {}
+
+    user_choice = interrupt({
+        "type": "player_death",
+        "summary": _build_player_death_summary(state.get("messages", [])),
+        "hp_changes": list(state.get("hp_changes", [])),
+    })
+
+    if player_dict:
+        if user_choice == "revive":
+            player_dict["hp"] = max(1, player_dict.get("max_hp", 1) // 2)
+        else:
+            player_dict["hp"] = 0
 
     result_state: dict = {
-        "combat": combat_dict,
-        "messages": [msg],
-        "hp_changes": hp_changes,
+        "combat": None,
+        "phase": "exploration",
+        "messages": [HumanMessage(content="[系统] 玩家角色倒下，战斗结束。")],
+        "hp_changes": [],
         "pending_reaction": None,
         "reaction_choice": None,
     }
@@ -306,89 +516,6 @@ def _finalize_monster_combat_state(
         result_state["player"] = player_dict
 
     return result_state
-
-
-def monster_combat_node(state: GraphState) -> dict:
-    """怪物/NPC 自动战斗节点：只处理当前一个非玩家单位的攻击 + 推进回合。
-    命中玩家后若存在可用反应，则只写入待决反应状态，由后续节点解析。
-    graph 条件边控制循环：下一个仍是怪物则再次进入本节点。"""
-    from app.services.tools._helpers import (
-        advance_turn, get_all_combatants, get_combatant,
-        roll_attack_hit, apply_attack_damage,
-    )
-    from app.services.tools.reactions import get_available_reactions
-
-    combat = state.get("combat")
-    if not combat:
-        return {}
-
-    combat_dict = _state_value_to_dict(combat)
-    participants = combat_dict.get("participants", {})
-
-    player_dict = _state_value_to_dict(state.get("player"))
-
-    current_id = combat_dict.get("current_actor_id", "")
-    actor = participants.get(current_id)
-
-    if not actor or actor.get("side") == "player":
-        result = {"combat": combat_dict, "pending_reaction": None, "reaction_choice": None}
-        if player_dict:
-            result["player"] = player_dict
-        return result
-
-    log_lines: list[str] = []
-    hp_changes: list[dict] = []
-    attack_roll: dict | None = None
-
-    if actor.get("hp", 0) <= 0:
-        turn_text = advance_turn(combat_dict, player_dict)
-        log_lines.append(turn_text)
-    else:
-        # 选择第一个存活的玩家单位作为目标
-        target = None
-        all_combatants = get_all_combatants(combat_dict, player_dict)
-        for uid, p in all_combatants.items():
-            if p.get("side") == "player" and p.get("hp", 0) > 0:
-                target = p
-                break
-
-        if not target:
-            log_lines.append("所有玩家单位已倒下！")
-        else:
-            roll_info = roll_attack_hit(actor, target)
-            attack_roll = dict(roll_info)
-
-            if roll_info.get("hit") and not roll_info.get("blocked") and target is player_dict:
-                reaction_context = {
-                    "attacker": actor.get("name", current_id),
-                    "attack_roll": {
-                        "raw_roll": roll_info.get("raw_roll", roll_info.get("natural", 0)),
-                        "attack_bonus": roll_info.get("attack_bonus", 0),
-                        "final_total": roll_info["hit_total"],
-                        "hit_total": roll_info["hit_total"],
-                        "target_ac": roll_info["target_ac"],
-                    },
-                }
-                available = get_available_reactions(player_dict, "on_hit", reaction_context)
-                if available:
-                    result_state: dict = {
-                        "combat": combat_dict,
-                        "pending_reaction": _build_pending_reaction(actor, target, roll_info, available),
-                        "reaction_choice": None,
-                    }
-                    if player_dict:
-                        result_state["player"] = player_dict
-                    return result_state
-
-            atk_lines, _, hp_change, _ = apply_attack_damage(actor, target, roll_info)
-            log_lines.extend(atk_lines)
-            if hp_change:
-                hp_changes.append(hp_change)
-
-            turn_text = advance_turn(combat_dict, player_dict)
-            log_lines.append(turn_text)
-
-    return _finalize_monster_combat_state(combat_dict, player_dict, log_lines, hp_changes, attack_roll=attack_roll)
 
 
 def resolve_reaction_node(state: GraphState) -> dict:
@@ -465,4 +592,13 @@ def resolve_reaction_node(state: GraphState) -> dict:
     turn_text = advance_turn(combat_dict, player_dict)
     log_lines.append(turn_text)
 
-    return _finalize_monster_combat_state(combat_dict, player_dict, log_lines, hp_changes, attack_roll=roll_info)
+    result_state: dict = {
+        "combat": combat_dict,
+        "messages": [_build_combat_system_message(log_lines, attack_roll=roll_info)],
+        "hp_changes": hp_changes,
+        "pending_reaction": None,
+        "reaction_choice": None,
+    }
+    if player_dict:
+        result_state["player"] = player_dict
+    return result_state
