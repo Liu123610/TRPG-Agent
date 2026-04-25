@@ -2,7 +2,6 @@
 
 /**
  * 武器名称中英文映射表
- * 覆盖常见的简单武器、军用武器和远程武器
  */
 const weaponNameMap: Record<string, string> = {
   // 简单武器
@@ -19,7 +18,6 @@ const weaponNameMap: Record<string, string> = {
   light_crossbow: '轻弩',
   dart: '飞镖',
   sling: '投石索',
-
   // 军用武器
   battleaxe: '战斧',
   flail: '连枷',
@@ -42,7 +40,6 @@ const weaponNameMap: Record<string, string> = {
   heavy_crossbow: '重弩',
   longbow: '长弓',
   shortbow: '短弓',
-
   // 其他常见
   unarmed_strike: '徒手打击',
   natural_weapon: '天生武器',
@@ -52,7 +49,6 @@ const weaponNameMap: Record<string, string> = {
 
 /**
  * 法术名称中英文映射表
- * 包含戏法、1-3环常见法术
  */
 const spellNameMap: Record<string, string> = {
   // 戏法
@@ -71,7 +67,6 @@ const spellNameMap: Record<string, string> = {
   resistance: '抵抗术',
   spare_the_dying: '稳定伤势',
   thaumaturgy: '奇术',
-
   // 1环
   magic_missile: '魔法飞弹',
   shield: '护盾术',
@@ -90,7 +85,6 @@ const spellNameMap: Record<string, string> = {
   longstrider: '大步奔行',
   mage_armor: '法师护甲',
   thunderwave: '雷鸣波',
-
   // 2环
   hold_person: '人类定身术',
   invisibility: '隐形术',
@@ -100,7 +94,6 @@ const spellNameMap: Record<string, string> = {
   enhance_ability: '属性强化',
   see_invisibility: '识破隐形',
   suggestion: '暗示术',
-
   // 3环
   fireball: '火球术',
   lightning_bolt: '闪电束',
@@ -112,8 +105,7 @@ const spellNameMap: Record<string, string> = {
   revivify: '死者复活',
   spirit_guardians: '灵体卫士',
   hypnotic_pattern: '催眠图纹',
-
-  // 常见法术变体（带空格的名称）
+  // 带空格的变体
   'acid splash': '强酸溅射',
   'blade ward': '剑刃防护',
   'dancing lights': '舞光术',
@@ -125,7 +117,6 @@ const spellNameMap: Record<string, string> = {
  * 道具/物品名称中英文映射表
  */
 const itemNameMap: Record<string, string> = {
-  // 药水
   potion_of_healing: '治疗药水',
   greater_potion_of_healing: '强效治疗药水',
   superior_potion_of_healing: '高等治疗药水',
@@ -133,13 +124,9 @@ const itemNameMap: Record<string, string> = {
   potion_of_invisibility: '隐形药水',
   potion_of_hill_giant_strength: '山丘巨人力量药水',
   potion_of_fire_breath: '火焰吐息药水',
-
-  // 卷轴
   scroll_of_fireball: '火球术卷轴',
   scroll_of_magic_missile: '魔法飞弹卷轴',
   scroll_of_cure_wounds: '治疗伤口卷轴',
-
-  // 魔法物品
   bag_of_holding: '次元袋',
   rope_of_climbing: '攀爬绳',
   alchemists_fire: '炼金之火',
@@ -148,8 +135,6 @@ const itemNameMap: Record<string, string> = {
   holy_water: '圣水',
   oil: '油',
   poison_basic: '基本毒药',
-
-  // 通用冒险装备
   torch: '火把',
   rations: '口粮',
   waterskin: '水囊',
@@ -163,10 +148,10 @@ const itemNameMap: Record<string, string> = {
 }
 
 /**
- * 资源名称中英文映射表（法术位、职业特性等）
+ * 资源名称中英文映射表（精确匹配用）
  */
 const resourceNameMap: Record<string, string> = {
-  // 法术位
+  // 法术位（标准下划线格式）
   spell_slots_level_1: '一环法术位',
   spell_slots_level_2: '二环法术位',
   spell_slots_level_3: '三环法术位',
@@ -176,8 +161,8 @@ const resourceNameMap: Record<string, string> = {
   spell_slots_level_7: '七环法术位',
   spell_slots_level_8: '八环法术位',
   spell_slots_level_9: '九环法术位',
-
-  // 职业特性资源
+  spell_slots_level_0: '戏法位',
+  // 职业资源
   rages: '狂暴次数',
   rage: '狂暴',
   action_surge: '动作如潮',
@@ -196,7 +181,7 @@ const resourceNameMap: Record<string, string> = {
   arcane_recovery: '奥法回复',
   sorcery_points: '术法点',
   metamagic: '超魔法',
-
+  pact_slots: '契法术位',
   // 通用
   mana: '法力',
   stamina: '精力',
@@ -243,11 +228,40 @@ export function translateItemName(englishName: string): string {
 }
 
 /**
- * 翻译资源名称
+ * 翻译资源名称（增强版：支持法术位的常见变体）
  */
 export function translateResourceName(englishName: string): string {
   const lower = englishName.toLowerCase().trim()
-  return resourceNameMap[lower] || formatFallbackName(englishName)
+  
+  // 1. 精确匹配（优先）
+  if (resourceNameMap[lower]) {
+    return resourceNameMap[lower]
+  }
+  
+  // 2. 智能匹配法术位：只要 key 中包含 'spell' 和 'slot' 并且包含数字
+  if (lower.includes('spell') && lower.includes('slot')) {
+    const match = englishName.match(/\d+/)  // 提取第一个数字
+    if (match) {
+      const level = parseInt(match[0], 10)
+      if (level >= 0 && level <= 9) {
+        const levelNames: Record<number, string> = {
+          0: '戏法位', 1: '一环法术位', 2: '二环法术位', 3: '三环法术位',
+          4: '四环法术位', 5: '五环法术位', 6: '六环法术位',
+          7: '七环法术位', 8: '八环法术位', 9: '九环法术位'
+        }
+        return levelNames[level] || `${level}环法术位`
+      }
+    }
+  }
+  
+  // 3. 其他常见资源（Pact Slots, Mana Points 等）
+  if (lower.includes('pact') && lower.includes('slot')) return '契法术位'
+  if (lower.includes('mana') && lower.includes('point')) return '法力值'
+  if (lower.includes('channel') && lower.includes('divinity')) return '引导神力'
+  if (lower.includes('wild') && lower.includes('shape')) return '荒野形态'
+  
+  // 4. 兜底格式化
+  return formatFallbackName(englishName)
 }
 
 /**
