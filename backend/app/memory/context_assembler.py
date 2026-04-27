@@ -13,6 +13,9 @@ from app.graph.constants import COMBAT_AGENT_MODE, NARRATIVE_AGENT_MODE
 from app.graph.state import GraphState
 
 
+COMBAT_ARCHIVE_MESSAGE_PREFIX = "[系统:战斗归档]"
+
+
 class ExternalContextProvider(Protocol):
     """为未来的外部 RAG 能力预留注入口，当前默认不返回任何片段。"""
 
@@ -116,7 +119,10 @@ class ContextAssembler:
         return "\n\n=== 实时系统监控窗(HUD) ===\n" + "\n\n".join(sections) + "\n===========================\n"
 
     def build_model_input_messages(self, state: GraphState, mode: str, hud_text: str) -> list[BaseMessage]:
-        source_messages = list(state.get("messages", []))
+        source_messages = collapse_archived_combat_messages(
+            list(state.get("messages", [])),
+            state.get("combat_archives", []),
+        )
         trimmed_messages = trim_model_messages(source_messages, mode)
         projected_messages: list[BaseMessage] = []
 
@@ -126,6 +132,9 @@ class ContextAssembler:
                 continue
 
             if isinstance(message, HumanMessage) and isinstance(message.content, str) and message.content.startswith("[系统:"):
+                if message.content.startswith(COMBAT_ARCHIVE_MESSAGE_PREFIX):
+                    projected_messages.append(message)
+                    continue
                 projected_messages.append(clone_message_with_content(message, summarize_system_message(message.content)))
                 continue
 
@@ -210,6 +219,65 @@ def trim_model_messages(messages: list[BaseMessage], mode: str) -> list[BaseMess
         start_index -= 1
 
     return list(messages[start_index:])
+
+
+def collapse_archived_combat_messages(messages: list[BaseMessage], combat_archives: list[dict[str, Any]] | None) -> list[BaseMessage]:
+    """中文注释：战后只把整段战斗投影成一条摘要，避免后续回合继续吞下整串战报。"""
+    normalized_archives = normalize_combat_archives(combat_archives, len(messages))
+    if not normalized_archives:
+        return list(messages)
+
+    collapsed: list[BaseMessage] = []
+    cursor = 0
+    for archive in normalized_archives:
+        start_index = archive["start_index"]
+        end_index = archive["end_index"]
+
+        if start_index < cursor:
+            continue
+
+        collapsed.extend(messages[cursor:start_index])
+        summary = archive["summary"]
+        if summary:
+            collapsed.append(HumanMessage(content=f"{COMBAT_ARCHIVE_MESSAGE_PREFIX}\n{summary}"))
+        else:
+            collapsed.extend(messages[start_index:end_index + 1])
+        cursor = end_index + 1
+
+    collapsed.extend(messages[cursor:])
+    return collapsed
+
+
+def normalize_combat_archives(combat_archives: list[dict[str, Any]] | None, message_count: int) -> list[dict[str, Any]]:
+    if not combat_archives or message_count <= 0:
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for archive in combat_archives:
+        if hasattr(archive, "model_dump"):
+            archive = archive.model_dump()
+        elif hasattr(archive, "items"):
+            archive = dict(archive)
+        else:
+            continue
+
+        start_index = archive.get("start_index")
+        end_index = archive.get("end_index")
+        if not isinstance(start_index, int) or not isinstance(end_index, int):
+            continue
+        if start_index < 0 or end_index < start_index or start_index >= message_count:
+            continue
+
+        normalized.append(
+            {
+                "summary": str(archive.get("summary", "")).strip(),
+                "start_index": start_index,
+                "end_index": min(end_index, message_count - 1),
+            }
+        )
+
+    normalized.sort(key=lambda item: (item["start_index"], item["end_index"]))
+    return normalized
 
 
 def append_hud_to_latest_message(messages: list[BaseMessage], hud_text: str) -> list[BaseMessage]:
@@ -315,6 +383,8 @@ def dump_mapping_state(value: Any) -> dict[str, Any]:
 def state_value_to_dict(value: Any) -> Any:
     if value is None:
         return None
+    if isinstance(value, list):
+        return [state_value_to_dict(item) for item in value]
     if hasattr(value, "model_dump"):
         return value.model_dump()
     if hasattr(value, "items"):

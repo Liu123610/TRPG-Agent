@@ -18,7 +18,7 @@ from app.graph.state import AttackInfo, CombatantState, CombatState, WeaponData
 from app.calculation.predefined_characters import PREDEFINED_CHARACTERS
 from app.conditions._base import build_condition_extra, create_condition
 from app.services.tool_service import _build_player_combatant, prepare_player_for_combat
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.types import Command
 
 
@@ -321,6 +321,28 @@ class TestPhaseLifecycle:
         result = _invoke_tool(end_combat, tool_input={"state": state})
         assert result.update.get("phase") == "exploration"
         assert result.update.get("combat") is None
+
+    def test_end_combat_archives_finished_battle_span(self):
+        from app.services.tool_service import end_combat
+
+        goblin = _make_goblin()
+        combat = _make_combat_state({"goblin_1": goblin}, current_actor_id="goblin_1")
+        state = {
+            "combat": combat,
+            "messages": [
+                HumanMessage(content="我冲向哥布林。"),
+                ToolMessage(content="战斗开始！第 1 回合。", tool_call_id="call_0"),
+                ToolMessage(content="Goblin 倒下。", tool_call_id="call_1"),
+            ],
+            "active_combat_message_start": 1,
+        }
+
+        result = _invoke_tool(end_combat, tool_input={"state": state})
+
+        assert result.update.get("active_combat_message_start") is None
+        assert result.update["combat_archives"][0]["start_index"] == 1
+        assert result.update["combat_archives"][0]["end_index"] == 3
+        assert "共进行了" in result.update["combat_archives"][0]["summary"]
 
 
 # ── Phase 6: WeaponData 模型验证 ────────────────────────────────

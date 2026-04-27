@@ -39,6 +39,23 @@ class Settings(BaseSettings):
         default=1,
         validation_alias=AliasChoices("TRPG_LLM_MAX_RETRIES", "OPENAI_MAX_RETRIES"),
     )
+    memory_summary_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("TRPG_MEMORY_SUMMARY_ENABLED"),
+    )
+    memory_summary_model: Optional[str] = Field(
+        default="deepseek-ai/DeepSeek-V3.2",
+        validation_alias=AliasChoices("TRPG_MEMORY_SUMMARY_MODEL"),
+    )
+    memory_summary_temperature: float = 0.2
+    memory_summary_timeout_seconds: float = Field(
+        default=20.0,
+        validation_alias=AliasChoices("TRPG_MEMORY_SUMMARY_TIMEOUT_SECONDS"),
+    )
+    memory_summary_max_retries: int = Field(
+        default=1,
+        validation_alias=AliasChoices("TRPG_MEMORY_SUMMARY_MAX_RETRIES"),
+    )
     memory_db_path: str = Field(
         default="data/context_memory.sqlite3",
         validation_alias=AliasChoices("TRPG_MEMORY_DB_PATH", "MEMORY_DB_PATH"),

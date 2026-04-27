@@ -16,6 +16,7 @@ from app.graph.builder import build_graph
 from app.memory.checkpointer import close_checkpointer, get_checkpointer
 from app.memory.episodic_store import EpisodicStore
 from app.memory.ingestion import MemoryIngestionPipeline
+from app.services.llm_service import LLMService
 from app.utils.agent_trace import trace_chat_error, trace_chat_request, trace_chat_result
 from app.utils.logger import logger
 
@@ -210,6 +211,8 @@ class ChatSessionService:
         return {
             "phase": values.get("phase"),
             "conversation_summary": values.get("conversation_summary", ""),
+            "active_combat_message_start": values.get("active_combat_message_start"),
+            "combat_archives": self._state_value_to_dict(values.get("combat_archives", [])),
             "player": self._state_value_to_dict(values.get("player")),
             "combat": self._state_value_to_dict(values.get("combat")),
             "scene_units": self._mapping_state_to_dict(values.get("scene_units")),
@@ -228,6 +231,8 @@ class ChatSessionService:
     def _state_value_to_dict(self, value: Any) -> Any:
         if value is None:
             return None
+        if isinstance(value, list):
+            return [self._state_value_to_dict(item) for item in value]
         if hasattr(value, "model_dump"):
             return value.model_dump()
         if hasattr(value, "items"):
@@ -298,10 +303,6 @@ class ChatSessionService:
         """读取最近的回合摘要，作为热路径的长期情节记忆输入。"""
         if self._episodic_store is None:
             return []
-
-        if hasattr(self._episodic_store, "fetch_recent_context_blocks"):
-            context_blocks = await self._episodic_store.fetch_recent_context_blocks(session_id)
-            return [block[:300] for block in context_blocks if block]
 
         summaries = await self._episodic_store.fetch_recent_summaries(session_id, limit=4)
         return [summary[:300] for summary in summaries if summary]
@@ -579,7 +580,7 @@ async def get_chat_session_service() -> ChatSessionService:
 
         graph = build_graph(checkpointer=await get_checkpointer(settings.memory_db_path))
         episodic_store = EpisodicStore(settings.memory_db_path)
-        memory_pipeline = MemoryIngestionPipeline(episodic_store)
+        memory_pipeline = MemoryIngestionPipeline(episodic_store, llm_service=LLMService())
         _CHAT_SESSION_SERVICE = ChatSessionService(
             graph=graph,
             memory_pipeline=memory_pipeline,

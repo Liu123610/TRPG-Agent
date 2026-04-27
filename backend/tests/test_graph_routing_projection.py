@@ -178,6 +178,38 @@ def test_combat_projection_trims_more_aggressively_than_full_history():
     assert messages[0].content == "消息 0"
 
 
+def test_post_combat_projection_collapses_archived_battle_to_single_summary():
+    state = {
+        "phase": "exploration",
+        "combat": None,
+        "player": _player_state(),
+        "messages": [
+            HumanMessage(content="我们进入洞穴。"),
+            ToolMessage(content="战斗开始！第 1 回合。", tool_call_id="call_1", name="start_combat"),
+            AIMessage(content="", tool_calls=[{"name": "attack_action", "args": {"attacker_id": "player_hero"}, "id": "call_2"}]),
+            ToolMessage(content="Goblin 使用 [Scimitar] 攻击 英雄!\n英雄 HP: 12 → 9", tool_call_id="call_2", name="attack_action"),
+            ToolMessage(content="共进行了 2 回合。 存活: 英雄 倒下: Goblin", tool_call_id="call_3", name="end_combat"),
+            HumanMessage(content="我检查哥布林尸体。"),
+        ],
+        "combat_archives": [
+            {
+                "summary": "英雄在 2 回合内击败哥布林，消耗 1 次护盾。",
+                "start_index": 1,
+                "end_index": 4,
+            }
+        ],
+    }
+
+    projected_messages = _build_model_input_messages(state, NARRATIVE_AGENT_MODE)
+
+    assert len(projected_messages) == 3
+    assert projected_messages[1].content.startswith("[系统:战斗归档]")
+    assert "英雄在 2 回合内击败哥布林" in projected_messages[1].content
+    assert "Goblin 使用 [Scimitar]" not in projected_messages[1].content
+    assert projected_messages[-1].content.startswith("我检查哥布林尸体。")
+    assert "实时系统监控窗" in projected_messages[-1].content
+
+
 def test_tool_profiles_split_exploration_and_combat_visibility():
     narrative_tools = {tool.name for tool in get_tool_profile("narrative")}
     combat_tools = {tool.name for tool in get_tool_profile("combat")}
@@ -320,6 +352,7 @@ def test_combat_resolution_node_interrupts_and_ends_battle_on_player_death():
             "max_hp": 18,
         },
         "messages": [ToolMessage(content="Goblin 使用 [Scimitar] 攻击 英雄!\n英雄 HP: 4 → 0", tool_call_id="call_1")],
+        "active_combat_message_start": 0,
         "hp_changes": [{"id": "player_hero", "old_hp": 4, "new_hp": 0, "max_hp": 18}],
     }
 
@@ -331,3 +364,7 @@ def test_combat_resolution_node_interrupts_and_ends_battle_on_player_death():
     assert result["player"]["hp"] == 9
     assert result["messages"][0].content == "[系统] 玩家角色倒下，战斗结束。"
     assert result["hp_changes"] == []
+    assert result["active_combat_message_start"] is None
+    assert result["combat_archives"][0]["start_index"] == 0
+    assert result["combat_archives"][0]["end_index"] == 1
+    assert "战斗以玩家角色倒下告终" in result["combat_archives"][0]["summary"]

@@ -26,6 +26,36 @@ from app.services.tools._helpers import (
 from app.services.tools.reactions import get_available_reactions
 
 
+def _message_count(state: dict | None) -> int:
+    messages = state.get("messages") or [] if state else []
+    return len(messages)
+
+
+def _combat_archives_from_state(state: dict | None) -> list[dict]:
+    if not state:
+        return []
+
+    raw_archives = state.get("combat_archives") or []
+    archives: list[dict] = []
+    for archive in raw_archives:
+        if hasattr(archive, "model_dump"):
+            archives.append(archive.model_dump())
+        elif hasattr(archive, "items"):
+            archives.append(dict(archive))
+    return archives
+
+
+def _build_combat_archive(summary: str, start_index: int, end_index: int) -> dict:
+    """归档只保留区间锚点与高密度摘要，供后续 prompt 折叠使用。"""
+    safe_start = max(start_index, 0)
+    safe_end = max(end_index, safe_start)
+    return {
+        "summary": summary.strip(),
+        "start_index": safe_start,
+        "end_index": safe_end,
+    }
+
+
 @tool
 def spawn_monsters(
     monster_index: str,
@@ -148,6 +178,7 @@ def start_combat(
     update: dict = {
         "combat": combat_dict,
         "phase": "combat",
+        "active_combat_message_start": _message_count(state),
         "messages": [
             ToolMessage(
                 content=f"战斗开始！第 1 回合。\n先攻顺序：\n{order_desc}\n\n当前行动者：{all_units[order[0]].get('name', order[0])} [ID: {order[0]}]",
@@ -316,7 +347,11 @@ def end_combat(
     """结束当前战斗。存活的非玩家单位回归场景，死亡单位归入死亡档案（可搜尸等）。"""
     combat_raw = state.get("combat")
     summary = "战斗结束。"
-    update: dict = {"combat": None, "phase": "exploration"}
+    update: dict = {
+        "combat": None,
+        "phase": "exploration",
+        "active_combat_message_start": None,
+    }
 
     player_raw = state.get("player")
     player_dict = player_raw.model_dump() if hasattr(player_raw, "model_dump") else dict(player_raw) if player_raw else None
@@ -365,6 +400,12 @@ def end_combat(
 
     if player_dict:
         update["player"] = player_dict
+
+    active_start = state.get("active_combat_message_start") if state else None
+    combat_archives = _combat_archives_from_state(state)
+    if isinstance(active_start, int):
+        combat_archives.append(_build_combat_archive(summary, active_start, _message_count(state)))
+        update["combat_archives"] = combat_archives
 
     update["messages"] = [ToolMessage(content=summary, tool_call_id=tool_call_id)]
     return Command(update=update)

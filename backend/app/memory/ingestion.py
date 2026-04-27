@@ -2,18 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
+from app.config.settings import settings
 from app.memory.episodic_store import EpisodicStore
+from app.services.llm_service import LLMService
+from app.utils.agent_trace import fail_llm_trace, finish_llm_trace, start_llm_trace
+from app.utils.logger import logger
 
 
 class MemoryIngestionPipeline:
     """将单轮对话沉淀为粗粒度的情节记忆，避免把高频战斗态长期化。"""
 
-    def __init__(self, episodic_store: EpisodicStore) -> None:
+    def __init__(
+        self,
+        episodic_store: EpisodicStore,
+        llm_service: LLMService | None = None,
+        *,
+        trace_dir: str | Path | None = None,
+    ) -> None:
         self._episodic_store = episodic_store
+        self._llm_service = llm_service
+        self._trace_dir = trace_dir
 
     async def ingest(
         self,
@@ -28,7 +43,18 @@ class MemoryIngestionPipeline:
         """把一轮对话拆成消息记录、稳定事件与派生摘要三个层次。"""
         normalized_messages = self._normalize_messages(new_messages)
         stable_events = self._extract_stable_events(old_state, new_state)
-        turn_summary = self._build_turn_summary(normalized_messages, stable_events, reply)
+        combat_summary = self._extract_latest_combat_summary(old_state, new_state)
+        rule_turn_summary = self._build_turn_summary(normalized_messages, stable_events, reply, combat_summary)
+        turn_summary = await self._compress_turn_summary(
+            session_id=session_id,
+            turn_id=turn_id,
+            phase=str(new_state.get("phase") or old_state.get("phase") or "memory_ingestion"),
+            normalized_messages=normalized_messages,
+            stable_events=stable_events,
+            reply=reply,
+            combat_summary=combat_summary,
+            rule_turn_summary=rule_turn_summary,
+        )
 
         if not normalized_messages and not stable_events and not turn_summary:
             return
@@ -59,6 +85,132 @@ class MemoryIngestionPipeline:
 
     async def close(self) -> None:
         await self._episodic_store.close()
+
+    async def _compress_turn_summary(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        phase: str,
+        normalized_messages: list[dict[str, Any]],
+        stable_events: list[dict[str, Any]],
+        reply: str,
+        combat_summary: str,
+        rule_turn_summary: str,
+    ) -> str:
+        if not self._should_use_model_summary(normalized_messages, stable_events, reply, combat_summary):
+            return rule_turn_summary
+
+        if not settings.memory_summary_enabled or self._llm_service is None:
+            return rule_turn_summary
+
+        system_prompt = self._build_summary_system_prompt()
+        summary_input = self._build_summary_input(
+            normalized_messages=normalized_messages,
+            stable_events=stable_events,
+            reply=reply,
+            combat_summary=combat_summary,
+            rule_turn_summary=rule_turn_summary,
+        )
+
+        invocation_id, started_at = start_llm_trace(
+            session_id,
+            mode="memory_summary",
+            phase=phase,
+            system_prompt=system_prompt,
+            hud_text="",
+            messages=[HumanMessage(content=summary_input)],
+            tools=[],
+            trace_dir=self._trace_dir,
+        )
+
+        started_perf = asyncio.get_running_loop().time()
+        try:
+            summary_text = await asyncio.to_thread(
+                self._llm_service.invoke_summary,
+                summary_input,
+                system_prompt=system_prompt,
+            )
+            normalized_summary = self._normalize_model_summary(summary_text)
+            finish_llm_trace(
+                session_id,
+                invocation_id=invocation_id,
+                started_at=started_at,
+                duration_ms=(asyncio.get_running_loop().time() - started_perf) * 1000,
+                mode="memory_summary",
+                phase=phase,
+                response=AIMessage(content=normalized_summary),
+                trace_dir=self._trace_dir,
+            )
+            return normalized_summary
+        except Exception as exc:
+            fail_llm_trace(
+                session_id,
+                invocation_id=invocation_id,
+                started_at=started_at,
+                duration_ms=(asyncio.get_running_loop().time() - started_perf) * 1000,
+                mode="memory_summary",
+                phase=phase,
+                error=exc,
+                trace_dir=self._trace_dir,
+            )
+            logger.exception("Memory summary compression failed for session {} turn {}", session_id, turn_id)
+            return rule_turn_summary
+
+    def _should_use_model_summary(
+        self,
+        normalized_messages: list[dict[str, Any]],
+        stable_events: list[dict[str, Any]],
+        reply: str,
+        combat_summary: str,
+    ) -> bool:
+        if stable_events or combat_summary:
+            return True
+        if reply.strip():
+            return True
+        return bool(normalized_messages)
+
+    def _build_summary_system_prompt(self) -> str:
+        return (
+            "你负责把单轮 TRPG 交互压缩成供后续模型使用的近期情节记忆。\n"
+            "只输出 1 到 3 句自然中文，不要项目符号，不要解释，不要加‘摘要’或‘总结’前缀。\n"
+            "只保留对后续叙事仍有价值的稳定事实：剧情推进、关系或立场变化、关键发现、重要承诺、未解决风险、战斗结果、持久资源消耗、持久状态变化。\n"
+            "不要重复 HUD 已提供的当前玩家状态；不要描述当前 HP、临时 HP、AC、先攻、行动经济、移动力、当前回合、即时站位。\n"
+            "不要复述逐次掷骰、逐条工具调用、细碎伤害数字，避免把短期战报污染成长期记忆。\n"
+            "如果本轮主要是战斗结束，优先总结战斗结果与后续影响。\n"
+            "如果没有值得长期保留的新信息，返回空字符串。"
+        )
+
+    def _build_summary_input(
+        self,
+        *,
+        normalized_messages: list[dict[str, Any]],
+        stable_events: list[dict[str, Any]],
+        reply: str,
+        combat_summary: str,
+        rule_turn_summary: str,
+    ) -> str:
+        payload = {
+            "stable_events": stable_events,
+            "combat_archive_summary": combat_summary,
+            "assistant_reply": reply.strip(),
+            "recent_messages": normalized_messages[-6:],
+            "rule_summary_draft": rule_turn_summary,
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def _normalize_model_summary(self, summary_text: str) -> str:
+        summary = summary_text.strip().strip('"').strip()
+        if not summary or summary.lower() in {"none", "null", "n/a"}:
+            return ""
+
+        for prefix in ("摘要：", "总结：", "近期情节记忆："):
+            if summary.startswith(prefix):
+                summary = summary[len(prefix):].strip()
+
+        if len(summary) > 240:
+            summary = summary[:237].rstrip("，。； ") + "..."
+        return summary
 
     def _normalize_messages(self, new_messages: list[BaseMessage]) -> list[dict[str, Any]]:
         """只保留后续检索有意义的消息骨架，不把整段原始上下文再复制一遍。"""
@@ -145,6 +297,7 @@ class MemoryIngestionPipeline:
         normalized_messages: list[dict[str, Any]],
         stable_events: list[dict[str, Any]],
         reply: str,
+        combat_summary: str,
     ) -> str:
         """用低成本规则生成可读摘要，先替代旧的阻塞式 LLM 摘要。"""
         lines: list[str] = []
@@ -174,6 +327,10 @@ class MemoryIngestionPipeline:
             elif event["type"] == "combat_ended":
                 lines.append(f"战斗结束，共持续 {event.get('rounds', 0)} 回合。")
 
+        if combat_summary:
+            lines.append(f"战斗摘要：{combat_summary}")
+            return " ".join(lines[:4]).strip()
+
         if reply:
             lines.append(f"主持人回应：{reply}")
 
@@ -190,6 +347,22 @@ class MemoryIngestionPipeline:
             return f"主持人回应：{reply}"
 
         return " ".join(lines[:4]).strip()
+
+    def _extract_latest_combat_summary(self, old_state: dict[str, Any], new_state: dict[str, Any]) -> str:
+        old_archives = old_state.get("combat_archives") or []
+        new_archives = new_state.get("combat_archives") or []
+        if len(new_archives) <= len(old_archives):
+            return ""
+
+        latest_archive = new_archives[-1]
+        if hasattr(latest_archive, "model_dump"):
+            latest_archive = latest_archive.model_dump()
+        elif hasattr(latest_archive, "items"):
+            latest_archive = dict(latest_archive)
+        else:
+            return ""
+
+        return str(latest_archive.get("summary", "")).strip()[:240]
 
     def _message_role_and_kind(self, message: BaseMessage) -> tuple[str, str]:
         if isinstance(message, ToolMessage):

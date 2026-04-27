@@ -31,6 +31,30 @@ def _get_context_assembler() -> ContextAssembler:
     return ContextAssembler()
 
 
+def _message_count(state: GraphState) -> int:
+    return len(state.get("messages", []))
+
+
+def _combat_archives_from_state(state: GraphState) -> list[dict]:
+    archives: list[dict] = []
+    for archive in state.get("combat_archives", []) or []:
+        if hasattr(archive, "model_dump"):
+            archives.append(archive.model_dump())
+        elif hasattr(archive, "items"):
+            archives.append(dict(archive))
+    return archives
+
+
+def _build_combat_archive(summary: str, start_index: int, end_index: int) -> dict:
+    safe_start = max(start_index, 0)
+    safe_end = max(end_index, safe_start)
+    return {
+        "summary": summary.strip(),
+        "start_index": safe_start,
+        "end_index": safe_end,
+    }
+
+
 def router_node(state: GraphState) -> dict:
     # Do not return the entire state to avoid duplicate updates in stream_mode="updates"
     return {}
@@ -163,9 +187,10 @@ def combat_resolution_node(state: GraphState) -> dict:
     if not _all_players_down(combat_dict, player_dict):
         return {}
 
+    death_summary = _build_player_death_summary(state.get("messages", []))
     user_choice = interrupt({
         "type": "player_death",
-        "summary": _build_player_death_summary(state.get("messages", [])),
+        "summary": death_summary,
         "hp_changes": list(state.get("hp_changes", [])),
     })
 
@@ -175,6 +200,16 @@ def combat_resolution_node(state: GraphState) -> dict:
         else:
             player_dict["hp"] = 0
 
+    archive_summary = "战斗以玩家角色倒下告终。"
+    compact_death_summary = death_summary.replace("\n", " | ").strip()
+    if compact_death_summary and compact_death_summary != "[系统:怪物行动] | 所有玩家单位已倒下！":
+        archive_summary += f" 最后关键战报：{compact_death_summary}"
+
+    combat_archives = _combat_archives_from_state(state)
+    active_start = state.get("active_combat_message_start")
+    if isinstance(active_start, int):
+        combat_archives.append(_build_combat_archive(archive_summary, active_start, _message_count(state)))
+
     result_state: dict = {
         "combat": None,
         "phase": "exploration",
@@ -182,9 +217,12 @@ def combat_resolution_node(state: GraphState) -> dict:
         "hp_changes": [],
         "pending_reaction": None,
         "reaction_choice": None,
+        "active_combat_message_start": None,
     }
     if player_dict:
         result_state["player"] = player_dict
+    if combat_archives:
+        result_state["combat_archives"] = combat_archives
 
     return result_state
 

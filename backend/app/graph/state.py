@@ -1,7 +1,7 @@
 ﻿# backend/app/graph/state.py
 from __future__ import annotations
 
-from typing import Annotated, Literal, Optional, TypedDict
+from typing import Any, Annotated, Literal, Optional, TypedDict
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
@@ -171,6 +171,8 @@ class GraphState(TypedDict, total=False):
     conversation_summary: str
     episodic_context: list[str]
     session_id: str
+    active_combat_message_start: Optional[int]
+    combat_archives: list[dict[str, Any]]
 
     # --- 扩展领域字段 ---
     phase: Literal["exploration", "combat", "resolution"]
