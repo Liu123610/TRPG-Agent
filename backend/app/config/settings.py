@@ -78,6 +78,40 @@ class Settings(BaseSettings):
             "OPENAI_BASE_URL",
         ),
     )
+    rerank_model: str = Field(
+        default="BAAI/bge-reranker-v2-m3",
+        validation_alias=AliasChoices("TRPG_RERANK_MODEL", "OPENAI_RERANK_MODEL"),
+    )
+    rerank_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "TRPG_RERANK_API_KEY",
+            "OPENAI_RERANK_API_KEY",
+            "TRPG_EMBEDDING_API_KEY",
+            "OPENAI_EMBEDDING_API_KEY",
+            "TRPG_LLM_API_KEY",
+            "OPENAI_API_KEY",
+        ),
+    )
+    rerank_base_url: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TRPG_RERANK_BASE_URL",
+            "OPENAI_RERANK_BASE_URL",
+            "TRPG_EMBEDDING_BASE_URL",
+            "OPENAI_EMBEDDING_BASE_URL",
+            "TRPG_LLM_BASE_URL",
+            "OPENAI_BASE_URL",
+        ),
+    )
+    rag_db_dir: str = Field(
+        default="data/rag_pdf_db",
+        validation_alias=AliasChoices("TRPG_RAG_DB_DIR", "RAG_DB_DIR"),
+    )
+    rag_source_pdf_path: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("TRPG_RAG_SOURCE_PDF_PATH", "RAG_SOURCE_PDF_PATH"),
+    )
     memory_db_path: str = Field(
         default="data/context_memory.sqlite3",
         validation_alias=AliasChoices("TRPG_MEMORY_DB_PATH", "MEMORY_DB_PATH"),

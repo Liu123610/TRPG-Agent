@@ -58,3 +58,5 @@ backend/logs/agent_2026-04-13.log
 logs/
 backend/logs/
 debuff.md
+backend/data/rag_*/
+backend/data/rag_pdf_test_outputs.txt
