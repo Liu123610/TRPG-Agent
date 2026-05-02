@@ -26,8 +26,6 @@ HUD_MARKERS = [
     "当前玩家",
     "状态面板",
     "hud",
-    "hp",
-    "ac",
     "法术位",
 ]
 
@@ -102,9 +100,18 @@ def _extract_query_tokens(query: str) -> set[str]:
     pairs = [
         ("blinded", "目盲"),
         ("charmed", "魅惑"),
+        ("deafened", "耳聋"),
+        ("frightened", "恐慌"),
+        ("grappled", "擒抱"),
         ("prone", "倒地"),
         ("invisible", "隐形"),
         ("incapacitated", "失能"),
+        ("paralyzed", "麻痹"),
+        ("petrified", "石化"),
+        ("poisoned", "中毒"),
+        ("restrained", "束缚"),
+        ("stunned", "震慑"),
+        ("unconscious", "昏迷"),
         ("falling", "坠落"),
         ("cover", "掩护"),
         ("cover", "掩体"),
@@ -412,9 +419,14 @@ def consult_rules_handbook(
 
             source = doc.metadata.get("source", "Unknown")
             sub_category = doc.metadata.get("sub_category", "unknown")
+            chapter = doc.metadata.get("chapter", "unknown")
+            section = doc.metadata.get("section", "unknown")
+            page_start = doc.metadata.get("page_start", "unknown")
+            page_end = doc.metadata.get("page_end", page_start)
             excerpt = re.sub(r"\n{3,}", "\n\n", content[:500])
             evidence_blocks.append(
-                f"[{idx}] 来源={source} | sub_category={sub_category}\n"
+                f"[{idx}] 来源={source} | 章节={chapter} | 小节={section} | "
+                f"页码={page_start}-{page_end} | sub_category={sub_category}\n"
                 f"原文片段:\n{excerpt}"
             )
 

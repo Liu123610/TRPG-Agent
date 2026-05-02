@@ -3,6 +3,7 @@ from typing import List, Optional
 import pickle
 from pathlib import Path
 import jieba
+import requests
 
 from langchain_core.documents import Document
 from langchain.retrievers.ensemble import EnsembleRetriever
@@ -11,14 +12,12 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
 
 # 引入 Rerank 组件
-from langchain.retrievers import ContextualCompressionRetriever
-from langchain.retrievers.document_compressors import CrossEncoderReranker
-from langchain_community.cross_encoders import HuggingFaceCrossEncoder
-
 from app.config.settings import settings
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
-DB_PATH = BACKEND_DIR / "data" / "rag_db"
+DB_PATH = Path(settings.rag_db_dir)
+if not DB_PATH.is_absolute():
+    DB_PATH = BACKEND_DIR / DB_PATH
 BM25_PATH = DB_PATH / "bm25_index.pkl"
 
 logger = logging.getLogger(__name__)
@@ -66,19 +65,10 @@ class TRPGHybridRetriever:
                 exc,
             )
 
-        # 本地已有模型则启用Rerank，若本地不存在则快速降级
-        self.cross_encoder = None
-        self.reranker = None
-        try:
-            self.cross_encoder = HuggingFaceCrossEncoder(
-                model_name="BAAI/bge-reranker-v2-m3"
-            )
-            self.reranker = CrossEncoderReranker(model=self.cross_encoder, top_n=3)
-        except Exception as exc:
-            logger.warning(
-                "Reranker model unavailable locally; fallback to EnsembleRetriever only. reason=%s",
-                exc,
-            )
+        # Rerank 统一走云端接口，团队成员只需按供应商配置环境变量。
+        self.rerank_url = self._build_rerank_url(settings.rerank_base_url)
+        self.rerank_api_key = settings.rerank_api_key
+        self.rerank_model = settings.rerank_model
 
     def _build_vector_retriever(self, filter_category: Optional[str], top_k: int = 10):
         if self.vectorstore is None:
@@ -105,15 +95,13 @@ class TRPGHybridRetriever:
         else:
             raise RuntimeError("No available retriever backend (BM25 and vector are both unavailable).")
 
-        if self.reranker is None:
-            return base_retriever
+        return base_retriever
 
-        # 基于交叉编码器的二度重排
-        compression_retriever = ContextualCompressionRetriever(
-            base_compressor=self.reranker,
-            base_retriever=base_retriever,
-        )
-        return compression_retriever
+    @staticmethod
+    def _build_rerank_url(base_url: Optional[str]) -> Optional[str]:
+        if not base_url:
+            return None
+        return f"{base_url.rstrip('/')}/rerank"
 
     @staticmethod
     def _apply_category_filter(results: List[Document], filter_category: Optional[str]) -> List[Document]:
@@ -123,9 +111,6 @@ class TRPGHybridRetriever:
 
     def search(self, query: str, filter_category: Optional[str] = None, top_k: int = 3) -> List[Document]:
         # 动态赋值期望的返回结果数
-        if self.reranker is not None:
-            self.reranker.top_n = top_k
-
         try:
             retriever = self.get_ensemble_retriever(filter_category)
         except Exception as exc:
@@ -163,10 +148,42 @@ class TRPGHybridRetriever:
             return []
 
         filtered_results = self._apply_category_filter(results, filter_category)
-        return filtered_results[:top_k]
+        return self._rerank(query, filtered_results, top_k)
+
+    def _rerank(self, query: str, docs: List[Document], top_k: int) -> List[Document]:
+        if not docs or not self.rerank_url or not self.rerank_api_key:
+            return docs[:top_k]
+
+        try:
+            response = requests.post(
+                self.rerank_url,
+                headers={
+                    "Authorization": f"Bearer {self.rerank_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.rerank_model,
+                    "query": query,
+                    "documents": [doc.page_content for doc in docs],
+                    "top_n": min(top_k, len(docs)),
+                    "return_documents": False,
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            ranked_docs = [
+                docs[item["index"]]
+                for item in payload.get("results", [])
+                if 0 <= item.get("index", -1) < len(docs)
+            ]
+            return ranked_docs[:top_k] or docs[:top_k]
+        except Exception as exc:
+            logger.warning("Cloud rerank unavailable; return ensemble results. reason=%s", exc)
+            return docs[:top_k]
 
 if __name__ == "__main__":
-    print("Initializing retriever (reranker uses local cache only; fallback if unavailable")
+    print("Initializing retriever")
     retriever = TRPGHybridRetriever()
     print("OK, execute search: '我能攻击躲在树后的人吗'")
     results = retriever.search("我能攻击躲在树后的人吗")
