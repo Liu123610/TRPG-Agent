@@ -120,6 +120,9 @@ class AttackInfo(BaseModel):
     attack_bonus: int = 0
     damage_dice: str = "1d4"          # d20 库可直接解析的表达式
     damage_type: str = "bludgeoning"
+    reach_feet: int = 5               # 近战触及范围；远程攻击保留默认值供机会攻击等后续规则复用
+    normal_range_feet: int | None = None
+    long_range_feet: int | None = None
 
 
 class CombatantState(BaseModel, extra="allow"):
@@ -158,6 +161,38 @@ class CombatState(BaseModel, extra="allow"):
     current_actor_id: str = ""
 
 
+class Point2D(BaseModel):
+    """二维坐标点 — 空间系统只承认平面位置，不引入 z 轴"""
+    x: float = 0
+    y: float = 0
+
+
+class PlaneMapState(BaseModel, extra="allow"):
+    """平面地图定义 — 只保存可序列化边界信息，几何计算交给 Shapely 临时完成"""
+    id: str = ""
+    name: str = ""
+    width: float = 100
+    height: float = 100
+    grid_size: float = 5
+    description: str = ""
+
+
+class UnitPlacementState(BaseModel, extra="allow"):
+    """单位在某张平面地图上的落点"""
+    unit_id: str = ""
+    map_id: str = ""
+    position: Point2D = Field(default_factory=Point2D)
+    facing_deg: float = 0
+    footprint_radius: float = 2.5
+
+
+class SpaceState(BaseModel, extra="allow"):
+    """空间系统总状态 — 地图与单位落点独立于战斗数值，便于剧情换图和跨阶段复用"""
+    active_map_id: str = ""
+    maps: dict[str, PlaneMapState] = Field(default_factory=dict)
+    placements: dict[str, UnitPlacementState] = Field(default_factory=dict)
+
+
 # ── LangGraph 共享状态 ─────────────────────────────────────────
 
 
@@ -187,6 +222,9 @@ class GraphState(TypedDict, total=False):
 
     # 场景单位池 — spawn 产出放这里，start_combat 从中挑选参战者
     scene_units: dict[str, CombatantState]
+
+    # 平面空间状态 — 记录地图与单位坐标，供移动、距离、范围判定复用
+    space: SpaceState
 
     combat: Optional[CombatState]
 

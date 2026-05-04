@@ -31,7 +31,7 @@ def _make_goblin(uid: str = "goblin_1") -> dict:
         hp=7, max_hp=7, ac=15, speed=30,
         abilities={"str": 8, "dex": 14, "con": 10, "int": 10, "wis": 8, "cha": 8},
         modifiers={"str": -1, "dex": 2, "con": 0, "int": 0, "wis": -1, "cha": -1},
-        attacks=[AttackInfo(name="Scimitar", attack_bonus=4, damage_dice="1d6+2", damage_type="slashing")],
+        attacks=[AttackInfo(name="Scimitar", attack_bonus=4, damage_dice="1d6+2", damage_type="slashing", reach_feet=5)],
     ).model_dump()
 
 
@@ -59,6 +59,18 @@ def _make_player_combatant(profile_key: str = "战士") -> dict:
     player = dict(PREDEFINED_CHARACTERS[profile_key])
     prepare_player_for_combat(player)
     return player
+
+
+def _make_space_state(unit_ids: list[str]) -> dict:
+    """构建最小战斗地图，让 start_combat 的空间前置条件显式满足。"""
+    return {
+        "active_map_id": "map_1",
+        "maps": {"map_1": {"id": "map_1", "name": "战斗地图", "width": 100, "height": 100, "grid_size": 5}},
+        "placements": {
+            unit_id: {"unit_id": unit_id, "map_id": "map_1", "position": {"x": index * 10, "y": 0}}
+            for index, unit_id in enumerate(unit_ids)
+        },
+    }
 
 
 def _invoke_tool(tool_func, *, tool_input: dict) -> object:
@@ -136,7 +148,7 @@ class TestStartCombatPlayerJoin:
         """玩家角色卡存在时，start_combat 后 initiative_order 应包含玩家 ID"""
         player = PREDEFINED_CHARACTERS["战士"]
         goblin = _make_goblin()
-        state = {"player": player, "scene_units": {"goblin_1": goblin}}
+        state = {"player": player, "scene_units": {"goblin_1": goblin}, "space": _make_space_state(["player_预设-战士", "goblin_1"])}
         result = self._invoke_start_combat(state)
 
         combat_update = result.update["combat"]
@@ -151,16 +163,44 @@ class TestStartCombatPlayerJoin:
         """start_combat 应将 phase 设为 'combat'"""
         player = PREDEFINED_CHARACTERS["战士"]
         goblin = _make_goblin()
-        state = {"player": player, "scene_units": {"goblin_1": goblin}}
+        state = {"player": player, "scene_units": {"goblin_1": goblin}, "space": _make_space_state(["player_预设-战士", "goblin_1"])}
         result = self._invoke_start_combat(state)
         assert result.update.get("phase") == "combat"
 
     def test_no_player_still_works(self):
         """没有加载玩家角色时，start_combat 仍然正常运行"""
         goblin = _make_goblin()
-        state = {"scene_units": {"goblin_1": goblin}}
+        state = {"scene_units": {"goblin_1": goblin}, "space": _make_space_state(["goblin_1"])}
         result = self._invoke_start_combat(state)
         assert "goblin_1" in result.update["combat"]["participants"]
+
+    def test_start_combat_requires_active_space_map(self):
+        """战斗开始前必须先建立平面地图。"""
+        player = PREDEFINED_CHARACTERS["战士"]
+        goblin = _make_goblin()
+        state = {"player": player, "scene_units": {"goblin_1": goblin}}
+
+        result = self._invoke_start_combat(state)
+
+        assert "无法开始战斗" in result.update["messages"][0].content
+        assert "平面地图" in result.update["messages"][0].content
+        assert "combat" not in result.update
+
+    def test_start_combat_requires_all_combatants_placed(self):
+        """战斗开始前所有参战者都必须有落点。"""
+        player = PREDEFINED_CHARACTERS["战士"]
+        goblin = _make_goblin()
+        state = {
+            "player": player,
+            "scene_units": {"goblin_1": goblin},
+            "space": _make_space_state(["player_预设-战士"]),
+        }
+
+        result = self._invoke_start_combat(state)
+
+        assert "goblin_1" in result.update["messages"][0].content
+        assert "尚未放置" in result.update["messages"][0].content
+        assert "combat" not in result.update
 
 
 # ── Phase 3: attack_action 校验与动作消耗 ────────────────────────
@@ -228,6 +268,7 @@ class TestAttackActionValidation:
         assert isinstance(result, Command)
         attacker = result.update["combat"]["participants"]["goblin_1"]
         assert attacker["action_available"] is False
+        assert result.update["combat"]["current_actor_id"] == "goblin_1"
 
     def test_attack_deals_damage_from_weapon(self):
         """攻击使用武器数据而非硬编码（使用怪物攻击以避免玩家 interrupt）"""
@@ -273,6 +314,66 @@ class TestAttackActionValidation:
         assert result.update["messages"][0].additional_kwargs["hidden_from_ui"] is True
         assert "hp_changes" not in result.update
         assert result.update["player"]["hp"] == state["player"]["hp"]
+
+    def test_melee_attack_rejected_when_space_distance_exceeds_reach(self):
+        """空间系统启用后，近战攻击必须满足触及距离。"""
+        state = self._build_state(current_actor_id="goblin_1")
+        state["space"] = {
+            "active_map_id": "map_1",
+            "maps": {"map_1": {"id": "map_1", "name": "训练场", "width": 100, "height": 100}},
+            "placements": {
+                "goblin_1": {"unit_id": "goblin_1", "map_id": "map_1", "position": {"x": 0, "y": 0}},
+                "player_预设-战士": {"unit_id": "player_预设-战士", "map_id": "map_1", "position": {"x": 10, "y": 0}},
+            },
+        }
+
+        result = self._invoke_attack(state, "goblin_1", "player_预设-战士")
+
+        msg = result.update["messages"][0].content
+        assert "距离不足" in msg
+        assert state["combat"].participants["goblin_1"].action_available is True
+
+    def test_ranged_attack_allowed_within_normal_range(self):
+        """远程武器使用自身射程，而不是近战 5 尺触及。"""
+        player_c = _make_player_combatant("游侠")
+        goblin = _make_goblin()
+        combat = _make_combat_state(
+            {player_c["id"]: player_c, "goblin_1": goblin},
+            current_actor_id=player_c["id"],
+            player_dict=player_c,
+        )
+        state = {
+            "combat": combat,
+            "player": player_c,
+            "space": {
+                "active_map_id": "map_1",
+                "maps": {"map_1": {"id": "map_1", "name": "林道", "width": 200, "height": 100}},
+                "placements": {
+                    player_c["id"]: {"unit_id": player_c["id"], "map_id": "map_1", "position": {"x": 0, "y": 0}},
+                    "goblin_1": {"unit_id": "goblin_1", "map_id": "map_1", "position": {"x": 60, "y": 0}},
+                },
+            },
+        }
+
+        result = self._invoke_attack(state, player_c["id"], "goblin_1", attack_name="Longbow")
+
+        assert "射程不足" not in result.update["messages"][0].content
+        assert result.update["player"]["action_available"] is False
+
+    def test_attack_rejected_when_space_exists_but_target_not_placed(self):
+        """有地图时必须让参战单位拥有明确落点，避免距离规则被绕过。"""
+        state = self._build_state(current_actor_id="goblin_1")
+        state["space"] = {
+            "active_map_id": "map_1",
+            "maps": {"map_1": {"id": "map_1", "name": "训练场", "width": 100, "height": 100}},
+            "placements": {
+                "goblin_1": {"unit_id": "goblin_1", "map_id": "map_1", "position": {"x": 0, "y": 0}},
+            },
+        }
+
+        result = self._invoke_attack(state, "goblin_1", "player_预设-战士")
+
+        assert "尚未放置" in result.update["messages"][0].content
 
 
 # ── Phase 4: next_turn 重置动作资源 ──────────────────────────────
@@ -343,6 +444,23 @@ class TestPhaseLifecycle:
         assert result.update["combat_archives"][0]["start_index"] == 1
         assert result.update["combat_archives"][0]["end_index"] == 3
         assert "共进行了" in result.update["combat_archives"][0]["summary"]
+
+    def test_end_combat_removes_dead_units_from_space(self):
+        from app.services.tool_service import end_combat
+
+        goblin = _make_goblin()
+        goblin["hp"] = 0
+        combat = _make_combat_state({"goblin_1": goblin}, current_actor_id="goblin_1")
+        state = {
+            "combat": combat,
+            "space": _make_space_state(["goblin_1"]),
+            "scene_units": {"goblin_1": goblin},
+        }
+
+        result = _invoke_tool(end_combat, tool_input={"state": state})
+
+        assert "goblin_1" not in result.update["space"]["placements"]
+        assert "goblin_1" in result.update["dead_units"]
 
 
 # ── Phase 6: WeaponData 模型验证 ────────────────────────────────
@@ -417,6 +535,53 @@ class TestModifyCharacterStateResources:
         assert isinstance(result, Command)
         assert result.update["player"]["resources"]["spell_slot_lv1"] == 2
 
+    def test_unknown_state_change_keys_fail_fast_without_update(self):
+        from app.services.tool_service import modify_character_state
+
+        player = copy.deepcopy(PREDEFINED_CHARACTERS["法师"])
+        player["hp"] = 4
+        player["resources"] = {"spell_slot_lv1": 0}
+        state = {"player": player}
+
+        result = _invoke_tool(
+            modify_character_state,
+            tool_input={
+                "target_id": "player",
+                "changes": {"hp": 8, "resources": {"spell_slot_lv1": 2}},
+                "reason": "测试错误字段",
+                "state": state,
+            },
+        )
+
+        assert isinstance(result, Command)
+        assert "player" not in result.update
+        content = result.update["messages"][0].content
+        assert "未知 changes 字段 hp, resources" in content
+        assert "set_hp" in content
+        assert "set_resource" in content
+
+    def test_restore_hp_and_spell_slots_uses_explicit_state_change_keys(self):
+        from app.services.tool_service import modify_character_state
+
+        player = copy.deepcopy(PREDEFINED_CHARACTERS["法师"])
+        player["hp"] = 4
+        player["resources"] = {"spell_slot_lv1": 0}
+        state = {"player": player}
+
+        result = _invoke_tool(
+            modify_character_state,
+            tool_input={
+                "target_id": "player",
+                "changes": {"set_hp": 8, "set_resource": {"spell_slot_lv1": "max"}},
+                "reason": "测试恢复",
+                "state": state,
+            },
+        )
+
+        assert isinstance(result, Command)
+        assert result.update["player"]["hp"] == 8
+        assert result.update["player"]["resources"]["spell_slot_lv1"] == 2
+
     def test_grant_xp_action_uses_unified_state_tool(self):
         from app.services.tool_service import modify_character_state
 
@@ -477,9 +642,10 @@ class TestMageArmorSpell:
     """验证法师护甲已注册、已装载到预设施法者，并能通过状态系统生效"""
 
     def test_mage_armor_loaded_on_wizard_and_sorcerer(self):
-        # 法师 1 级默认仅有 magic_missile + shield；术士仍默认带 mage_armor
-        assert "mage_armor" not in PREDEFINED_CHARACTERS["法师"]["known_spells"]
+        # 1 级法师/术士默认学习法师护甲，护盾术留给后续升级取得。
+        assert "mage_armor" in PREDEFINED_CHARACTERS["法师"]["known_spells"]
         assert "mage_armor" in PREDEFINED_CHARACTERS["术士"]["known_spells"]
+        assert "shield" not in PREDEFINED_CHARACTERS["法师"]["known_spells"]
 
     def test_mage_armor_condition_is_registered(self):
         from app.conditions import get_condition_def
@@ -510,8 +676,309 @@ class TestMageArmorSpell:
         updated_player = result.update["player"]
         # mage_armor 不再直接修改 ac，而是通过 compute_ac 动态计算
         assert compute_ac(updated_player) == 15
+        assert updated_player["ac"] == 15
         assert updated_player["resources"]["spell_slot_lv1"] == 1
         assert any(c.get("id") == "mage_armor" for c in updated_player["conditions"])
+
+
+class TestSpellRangeValidation:
+    """验证法术在空间系统启用后遵守施法距离。"""
+
+    def test_ranged_cantrip_rejected_when_target_is_out_of_range(self):
+        from app.services.tool_service import cast_spell
+
+        player = copy.deepcopy(PREDEFINED_CHARACTERS["法师"])
+        goblin = _make_goblin()
+        state = {
+            "player": player,
+            "scene_units": {"goblin_1": goblin},
+            "space": {
+                "active_map_id": "map_1",
+                "maps": {"map_1": {"id": "map_1", "name": "长廊", "width": 300, "height": 60}},
+                "placements": {
+                    "player_预设-法师": {"unit_id": "player_预设-法师", "map_id": "map_1", "position": {"x": 0, "y": 0}},
+                    "goblin_1": {"unit_id": "goblin_1", "map_id": "map_1", "position": {"x": 130, "y": 0}},
+                },
+            },
+        }
+
+        result = _invoke_tool(
+            cast_spell,
+            tool_input={
+                "spell_id": "fire_bolt",
+                "target_ids": ["goblin_1"],
+                "state": state,
+            },
+        )
+
+        assert "距离不足" in result.update["messages"][0].content
+
+    def test_touch_spell_uses_five_feet_range(self):
+        from app.services.tool_service import cast_spell
+
+        player = copy.deepcopy(PREDEFINED_CHARACTERS["牧师"])
+        ally = _make_goblin("ally_1")
+        ally["side"] = "ally"
+        ally["hp"] = 1
+        state = {
+            "player": player,
+            "scene_units": {"ally_1": ally},
+            "space": {
+                "active_map_id": "map_1",
+                "maps": {"map_1": {"id": "map_1", "name": "神殿", "width": 40, "height": 40}},
+                "placements": {
+                    "player_预设-牧师": {"unit_id": "player_预设-牧师", "map_id": "map_1", "position": {"x": 0, "y": 0}},
+                    "ally_1": {"unit_id": "ally_1", "map_id": "map_1", "position": {"x": 10, "y": 0}},
+                },
+            },
+        }
+
+        result = _invoke_tool(
+            cast_spell,
+            tool_input={
+                "spell_id": "cure_wounds",
+                "target_ids": ["ally_1"],
+                "slot_level": 1,
+                "state": state,
+            },
+        )
+
+        assert "距离不足" in result.update["messages"][0].content
+
+    def test_self_spell_does_not_require_placement_distance(self):
+        from app.services.tool_service import cast_spell
+
+        player = copy.deepcopy(PREDEFINED_CHARACTERS["法师"])
+        player["known_spells"] = list(player["known_spells"]) + ["mirror_image"]
+        player["resources"]["spell_slot_lv2"] = 1
+        state = {
+            "player": player,
+            "space": {
+                "active_map_id": "map_1",
+                "maps": {"map_1": {"id": "map_1", "name": "镜厅", "width": 40, "height": 40}},
+                "placements": {},
+            },
+        }
+
+        result = _invoke_tool(
+            cast_spell,
+            tool_input={
+                "spell_id": "mirror_image",
+                "target_ids": ["self"],
+                "slot_level": 2,
+                "state": state,
+            },
+        )
+
+        assert "尚未放置" not in result.update["messages"][0].content
+        assert any(c.get("id") == "mirror_image" for c in result.update["player"]["conditions"])
+
+    def test_fireball_target_point_auto_selects_units_inside_area(self):
+        from app.services.tool_service import cast_spell
+
+        player = copy.deepcopy(PREDEFINED_CHARACTERS["法师"])
+        player["level"] = 5
+        player["known_spells"] = list(player["known_spells"]) + ["fireball"]
+        player["resources"]["spell_slot_lv3"] = 1
+        near = _make_goblin("near_goblin")
+        edge = _make_goblin("edge_goblin")
+        far = _make_goblin("far_goblin")
+        state = {
+            "player": player,
+            "scene_units": {"near_goblin": near, "edge_goblin": edge, "far_goblin": far},
+            "space": {
+                "active_map_id": "map_1",
+                "maps": {"map_1": {"id": "map_1", "name": "广场", "width": 200, "height": 200}},
+                "placements": {
+                    "player_预设-法师": {"unit_id": "player_预设-法师", "map_id": "map_1", "position": {"x": 0, "y": 0}},
+                    "near_goblin": {"unit_id": "near_goblin", "map_id": "map_1", "position": {"x": 35, "y": 30}},
+                    "edge_goblin": {"unit_id": "edge_goblin", "map_id": "map_1", "position": {"x": 50, "y": 30}},
+                    "far_goblin": {"unit_id": "far_goblin", "map_id": "map_1", "position": {"x": 70, "y": 30}},
+                },
+            },
+        }
+
+        result = _invoke_tool(
+            cast_spell,
+            tool_input={
+                "spell_id": "fireball",
+                "target_ids": [],
+                "target_point": {"x": 30, "y": 30},
+                "slot_level": 3,
+                "state": state,
+            },
+        )
+
+        assert result.update["scene_units"]["near_goblin"]["hp"] < near["hp"]
+        assert result.update["scene_units"]["edge_goblin"]["hp"] < edge["hp"]
+        assert result.update["scene_units"]["far_goblin"]["hp"] == far["hp"]
+        assert result.update["player"]["resources"]["spell_slot_lv3"] == 0
+
+    def test_fireball_area_can_include_caster(self):
+        from app.services.tool_service import cast_spell
+
+        player = copy.deepcopy(PREDEFINED_CHARACTERS["法师"])
+        player["level"] = 5
+        player["known_spells"] = list(player["known_spells"]) + ["fireball"]
+        player["resources"]["spell_slot_lv3"] = 1
+        state = {
+            "player": player,
+            "space": {
+                "active_map_id": "map_1",
+                "maps": {"map_1": {"id": "map_1", "name": "密室", "width": 100, "height": 100}},
+                "placements": {
+                    "player_预设-法师": {"unit_id": "player_预设-法师", "map_id": "map_1", "position": {"x": 10, "y": 10}},
+                },
+            },
+        }
+
+        result = _invoke_tool(
+            cast_spell,
+            tool_input={
+                "spell_id": "fireball",
+                "target_ids": [],
+                "target_point": {"x": 15, "y": 10},
+                "slot_level": 3,
+                "state": state,
+            },
+        )
+
+        assert result.update["player"]["hp"] < player["hp"]
+
+    def test_fireball_target_point_rejected_outside_cast_range(self):
+        from app.services.tool_service import cast_spell
+
+        player = copy.deepcopy(PREDEFINED_CHARACTERS["法师"])
+        player["level"] = 5
+        player["known_spells"] = list(player["known_spells"]) + ["fireball"]
+        player["resources"]["spell_slot_lv3"] = 1
+        state = {
+            "player": player,
+            "space": {
+                "active_map_id": "map_1",
+                "maps": {"map_1": {"id": "map_1", "name": "旷野", "width": 300, "height": 300}},
+                "placements": {
+                    "player_预设-法师": {"unit_id": "player_预设-法师", "map_id": "map_1", "position": {"x": 0, "y": 0}},
+                },
+            },
+        }
+
+        result = _invoke_tool(
+            cast_spell,
+            tool_input={
+                "spell_id": "fireball",
+                "target_ids": [],
+                "target_point": {"x": 180, "y": 0},
+                "slot_level": 3,
+                "state": state,
+            },
+        )
+
+        assert "目标点距离 180.0 尺" in result.update["messages"][0].content
+
+    def test_thunderwave_uses_facing_square_area(self):
+        from app.services.tool_service import cast_spell
+
+        player = copy.deepcopy(PREDEFINED_CHARACTERS["法师"])
+        player["known_spells"] = list(player["known_spells"]) + ["thunderwave"]
+        front = _make_goblin("front_goblin")
+        side = _make_goblin("side_goblin")
+        state = {
+            "player": player,
+            "scene_units": {"front_goblin": front, "side_goblin": side},
+            "space": {
+                "active_map_id": "map_1",
+                "maps": {"map_1": {"id": "map_1", "name": "石室", "width": 80, "height": 80}},
+                "placements": {
+                    "player_预设-法师": {"unit_id": "player_预设-法师", "map_id": "map_1", "position": {"x": 10, "y": 10}, "facing_deg": 0},
+                    "front_goblin": {"unit_id": "front_goblin", "map_id": "map_1", "position": {"x": 20, "y": 10}},
+                    "side_goblin": {"unit_id": "side_goblin", "map_id": "map_1", "position": {"x": 10, "y": 20}},
+                },
+            },
+        }
+
+        result = _invoke_tool(
+            cast_spell,
+            tool_input={
+                "spell_id": "thunderwave",
+                "target_ids": [],
+                "slot_level": 1,
+                "state": state,
+            },
+        )
+
+        assert result.update["scene_units"]["front_goblin"]["hp"] < front["hp"]
+        assert result.update["scene_units"]["side_goblin"]["hp"] == side["hp"]
+
+    def test_burning_hands_uses_facing_cone_area(self):
+        from app.services.tool_service import cast_spell
+
+        player = copy.deepcopy(PREDEFINED_CHARACTERS["术士"])
+        center = _make_goblin("center_goblin")
+        outside = _make_goblin("outside_goblin")
+        state = {
+            "player": player,
+            "scene_units": {"center_goblin": center, "outside_goblin": outside},
+            "space": {
+                "active_map_id": "map_1",
+                "maps": {"map_1": {"id": "map_1", "name": "甬道", "width": 80, "height": 80}},
+                "placements": {
+                    "player_预设-术士": {"unit_id": "player_预设-术士", "map_id": "map_1", "position": {"x": 10, "y": 10}, "facing_deg": 0},
+                    "center_goblin": {"unit_id": "center_goblin", "map_id": "map_1", "position": {"x": 20, "y": 10}},
+                    "outside_goblin": {"unit_id": "outside_goblin", "map_id": "map_1", "position": {"x": 20, "y": 20}},
+                },
+            },
+        }
+
+        result = _invoke_tool(
+            cast_spell,
+            tool_input={
+                "spell_id": "burning_hands",
+                "target_ids": [],
+                "slot_level": 1,
+                "state": state,
+            },
+        )
+
+        assert result.update["scene_units"]["center_goblin"]["hp"] < center["hp"]
+        assert result.update["scene_units"]["outside_goblin"]["hp"] == outside["hp"]
+
+    def test_ice_knife_expands_area_around_primary_target_only(self):
+        from app.services.tool_service import cast_spell
+
+        player = copy.deepcopy(PREDEFINED_CHARACTERS["吟游诗人"])
+        player["known_spells"] = list(player["known_spells"]) + ["ice_knife"]
+        primary = _make_goblin("primary_goblin")
+        splash = _make_goblin("splash_goblin")
+        far = _make_goblin("far_goblin")
+        state = {
+            "player": player,
+            "scene_units": {"primary_goblin": primary, "splash_goblin": splash, "far_goblin": far},
+            "space": {
+                "active_map_id": "map_1",
+                "maps": {"map_1": {"id": "map_1", "name": "码头", "width": 120, "height": 80}},
+                "placements": {
+                    "player_预设-吟游诗人": {"unit_id": "player_预设-吟游诗人", "map_id": "map_1", "position": {"x": 0, "y": 0}},
+                    "primary_goblin": {"unit_id": "primary_goblin", "map_id": "map_1", "position": {"x": 30, "y": 0}},
+                    "splash_goblin": {"unit_id": "splash_goblin", "map_id": "map_1", "position": {"x": 34, "y": 0}},
+                    "far_goblin": {"unit_id": "far_goblin", "map_id": "map_1", "position": {"x": 40, "y": 0}},
+                },
+            },
+        }
+
+        result = _invoke_tool(
+            cast_spell,
+            tool_input={
+                "spell_id": "ice_knife",
+                "target_ids": ["primary_goblin"],
+                "slot_level": 1,
+                "state": state,
+            },
+        )
+
+        assert result.update["scene_units"]["primary_goblin"]["hp"] < primary["hp"]
+        assert result.update["scene_units"]["splash_goblin"]["hp"] < splash["hp"]
+        assert result.update["scene_units"]["far_goblin"]["hp"] == far["hp"]
 
 
 class TestReactionFlow:
@@ -530,6 +997,7 @@ class TestReactionFlow:
 
     def _build_reaction_state(self) -> dict:
         player = copy.deepcopy(PREDEFINED_CHARACTERS["法师"])
+        player["known_spells"] = list(player["known_spells"]) + ["shield"]
         prepare_player_for_combat(player)
         goblin = _make_goblin()
         combat = _make_combat_state(
@@ -593,7 +1061,8 @@ class TestReactionFlow:
         assert resolved["hp_changes"] == []
         assert resolved["player"]["hp"] == PREDEFINED_CHARACTERS["法师"]["hp"]
         assert resolved["player"]["resources"]["spell_slot_lv1"] == initial_slots - 1
-        assert all(c.get("id") != "shield_active" for c in resolved["player"].get("conditions", []))
+        assert resolved["combat"]["current_actor_id"] == "goblin_1"
+        assert any(c.get("id") == "shield_active" for c in resolved["player"].get("conditions", []))
 
         message = resolved["messages"][0]
         assert "护盾术" in message.content
@@ -628,6 +1097,7 @@ class TestReactionFlow:
         hp_change = resolved["hp_changes"][0]
         assert hp_change["old_hp"] == PREDEFINED_CHARACTERS["法师"]["hp"]
         assert hp_change["new_hp"] == PREDEFINED_CHARACTERS["法师"]["hp"] - 5
+        assert resolved["combat"]["current_actor_id"] == "goblin_1"
         assert resolved["messages"][0].additional_kwargs["attack_roll"]["final_total"] == 16
 
 

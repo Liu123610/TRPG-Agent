@@ -16,6 +16,21 @@ from app.conditions import get_combat_effects, get_condition_module, tick_condit
 from app.graph.state import AttackInfo
 
 
+RANGED_WEAPON_RANGES: dict[str, tuple[int, int]] = {
+    "shortbow": (80, 320),
+    "longbow": (150, 600),
+    "light crossbow": (80, 320),
+    "heavy crossbow": (100, 400),
+    "hand crossbow": (30, 120),
+    "sling": (30, 120),
+    "dart": (20, 60),
+    "javelin": (30, 120),
+    "handaxe": (20, 60),
+    "dagger": (20, 60),
+    "spear": (20, 60),
+}
+
+
 # ── 战斗覆盖字段 ────────────────────────────────────────────────
 # 战斗期间叠加到 player_dict 上的字段，战斗结束后清除
 COMBAT_OVERLAY_KEYS = frozenset({
@@ -73,11 +88,18 @@ def prepare_player_for_combat(player_dict: dict) -> dict:
         else:
             ability_mod = modifiers.get("str", 0)
 
+        weapon_name = str(w["name"]).lower()
+        range_tuple = RANGED_WEAPON_RANGES.get(weapon_name)
+        if range_tuple is None and "thrown" in props:
+            range_tuple = RANGED_WEAPON_RANGES.get(weapon_name)
+
         attacks.append(AttackInfo(
             name=w["name"],
             attack_bonus=prof + ability_mod,
             damage_dice=w.get("damage_dice", "1d4"),
             damage_type=w.get("damage_type", "bludgeoning"),
+            normal_range_feet=range_tuple[0] if range_tuple else None,
+            long_range_feet=range_tuple[1] if range_tuple else None,
         ).model_dump())
 
     name = player_dict.get("name", "player")
@@ -90,6 +112,7 @@ def prepare_player_for_combat(player_dict: dict) -> dict:
     player_dict["reaction_available"] = True
     player_dict["speed"] = 30
     player_dict["movement_left"] = 30
+    sync_ac_state(player_dict)
     return player_dict
 
 
@@ -163,6 +186,15 @@ def compute_ac(unit: dict) -> int:
     return ac
 
 
+def sync_ac_state(unit: dict) -> int:
+    """把当前计算结果写回 ac，供 HUD 和前端直接展示，不再读裸值。"""
+    ac = compute_ac(unit)
+    unit["ac"] = ac
+    if "base_ac" not in unit:
+        unit["base_ac"] = ac
+    return ac
+
+
 def compute_current_speed(unit: dict) -> int:
     """根据条件效果计算当前可用速度，统一消费 speed_zero/prevents_movement。"""
     speed = unit.get("speed", 30)
@@ -187,6 +219,39 @@ def sync_movement_state(unit: dict, *, reset_to_current_speed: bool = False) -> 
 def can_emit_attack_roll(roll_info: dict | None) -> bool:
     """区分内部攻击快照与前端骰子动画载荷，避免 blocked 行动误触发动画。"""
     return bool(roll_info) and not roll_info.get("blocked") and roll_info.get("emit_dice_roll", True)
+
+
+def choose_attack(attacker: dict, attack_name: str | None = None) -> dict | None:
+    """按名称选择攻击方式；不传名称时使用第一个攻击。"""
+    attacks = attacker.get("attacks", [])
+    if attack_name:
+        return next((a for a in attacks if a["name"].lower() == attack_name.lower()), None)
+    return attacks[0] if attacks else None
+
+
+def validate_attack_distance(
+    space_raw: dict | None,
+    attacker_id: str,
+    target_id: str,
+    attack: dict | None,
+) -> str | None:
+    """在已有空间状态时校验攻击距离；未启用空间系统的旧战斗保持原行为。"""
+    if not space_raw:
+        return None
+
+    from app.space.geometry import build_space_state, validate_unit_distance
+
+    space = build_space_state(space_raw)
+    if not space.maps:
+        return None
+
+    reach_feet = attack.get("reach_feet", 5) if attack else 5
+    normal_range = attack.get("normal_range_feet") if attack else None
+    long_range = attack.get("long_range_feet") if attack else None
+    max_range = long_range or normal_range or reach_feet
+    attack_name = attack.get("name", "徒手攻击") if attack else "徒手攻击"
+
+    return validate_unit_distance(space, attacker_id, target_id, max_range, action_label=attack_name)
 
 
 def build_attack_roll_event_payload(roll_info: dict) -> dict | None:
@@ -428,11 +493,7 @@ def roll_attack_hit(
     if block_reason:
         return _build_blocked_attack_result(block_reason)
 
-    attacks = attacker.get("attacks", [])
-    if attack_name:
-        chosen = next((a for a in attacks if a["name"].lower() == attack_name.lower()), None)
-    else:
-        chosen = attacks[0] if attacks else None
+    chosen = choose_attack(attacker, attack_name)
 
     atk_bonus = chosen["attack_bonus"] if chosen else 0
     dmg_dice = chosen["damage_dice"] if chosen else "1d4"

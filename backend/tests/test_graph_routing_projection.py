@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.graph.constants import ASSISTANT_NODE, COMBAT_AGENT_MODE, COMBAT_ASSISTANT_NODE, COMBAT_RESOLUTION_NODE, END_NODE, NARRATIVE_AGENT_MODE
 from app.graph.edges import route_from_assistant, route_from_combat_resolution, route_from_reaction_resolution, route_from_router, route_from_tool
@@ -8,7 +8,7 @@ from app.graph.nodes import combat_assistant_node, combat_resolution_node
 from app.memory.context_assembler import ContextAssembler, trim_model_messages
 from app.prompts import get_assistant_system_prompt
 from app.services.tools import get_tool_profile
-from app.services.tool_service import load_skill
+from app.services.tool_service import manage_space, modify_character_state
 
 
 def _context_assembler() -> ContextAssembler:
@@ -165,8 +165,11 @@ def test_model_projection_summarizes_tool_messages_without_mutating_transcript()
     projected_messages = _build_model_input_messages(state, COMBAT_AGENT_MODE)
 
     assert tool_message.content.startswith("Goblin 使用 [Scimitar]")
-    assert projected_messages[-1].content.startswith("[工具:attack_action]")
-    assert "实时系统监控窗" in projected_messages[-1].content
+    assert projected_messages[-2].content.startswith("[工具:attack_action]")
+    assert isinstance(projected_messages[-1], SystemMessage)
+    assert "<runtime_state" in projected_messages[-1].content
+    assert 'source="hud"' in projected_messages[-1].content
+    assert "状态快照" in projected_messages[-1].content
     assert state["messages"][-1].content == tool_message.content
 
 
@@ -203,24 +206,37 @@ def test_post_combat_projection_collapses_archived_battle_to_single_summary():
 
     projected_messages = _build_model_input_messages(state, NARRATIVE_AGENT_MODE)
 
-    assert len(projected_messages) == 3
+    assert len(projected_messages) == 4
     assert projected_messages[1].content.startswith("[系统:战斗归档]")
     assert "英雄在 2 回合内击败哥布林" in projected_messages[1].content
     assert "Goblin 使用 [Scimitar]" not in projected_messages[1].content
     assert projected_messages[-1].content.startswith("我检查哥布林尸体。")
-    assert "实时系统监控窗" in projected_messages[-1].content
+    assert isinstance(projected_messages[-2], SystemMessage)
+    assert "<runtime_state" in projected_messages[-2].content
+    assert 'source="hud"' in projected_messages[-2].content
+    assert "状态快照" in projected_messages[-2].content
 
 
 def test_tool_profiles_split_exploration_and_combat_visibility():
     narrative_tools = {tool.name for tool in get_tool_profile("narrative")}
     combat_tools = {tool.name for tool in get_tool_profile("combat")}
 
-    assert "load_skill" in narrative_tools
-    assert "load_skill" in combat_tools
+    assert "load_skill" not in narrative_tools
+    assert "load_skill" not in combat_tools
+    assert "weather" not in narrative_tools
+    assert "weather" not in combat_tools
     assert "start_combat" in narrative_tools
     assert "start_combat" not in combat_tools
     assert "attack_action" in combat_tools
     assert "attack_action" not in narrative_tools
+    assert "manage_space" in narrative_tools
+    assert "manage_space" in combat_tools
+    assert "create_plane_map" not in narrative_tools
+    assert "switch_plane_map" not in narrative_tools
+    assert "place_unit" not in narrative_tools
+    assert "move_unit" not in combat_tools
+    assert "measure_distance" not in combat_tools
+    assert "query_units_in_radius" not in combat_tools
     assert "grant_xp" not in narrative_tools
     assert "level_up" not in narrative_tools
     assert "choose_arcane_tradition" not in narrative_tools
@@ -229,11 +245,11 @@ def test_tool_profiles_split_exploration_and_combat_visibility():
     assert ASSISTANT_NODE == "assistant"
 
 
-def test_load_skill_returns_character_state_management_instructions():
-    result = load_skill.invoke({
-        "name": "load_skill",
-        "args": {"skill_id": "character_state_management"},
-        "id": "skill-call",
+def test_modify_character_state_help_returns_skill_instructions():
+    result = modify_character_state.invoke({
+        "name": "modify_character_state",
+        "args": {"action": "help"},
+        "id": "state-help-call",
         "type": "tool_call",
     })
 
@@ -241,6 +257,20 @@ def test_load_skill_returns_character_state_management_instructions():
     assert "角色状态调整技能" in content
     assert "modify_character_state" in content
     assert 'action="level_up"' in content
+
+
+def test_manage_space_help_returns_skill_instructions():
+    result = manage_space.invoke({
+        "name": "manage_space",
+        "args": {"action": "help"},
+        "id": "space-help-call",
+        "type": "tool_call",
+    })
+
+    content = result.update["messages"][0].content
+    assert "平面空间管理技能" in content
+    assert "manage_space" in content
+    assert 'action="query_radius"' in content
 
 
 def test_combat_brief_includes_conditions_attacks_and_scene_stakes():
@@ -276,7 +306,8 @@ def test_combat_turn_directive_switches_between_monster_and_player_turns():
     player_directive = _build_combat_turn_directive(player_state)
 
     assert "怪物/NPC" in monster_directive
-    assert "合法目标" in monster_directive
+    assert "可执行动作" in monster_directive
+    assert "approach_unit" in monster_directive
     assert "玩家单位" in player_directive
     assert "玩家最新意图" in player_directive
 
@@ -301,7 +332,8 @@ def test_combat_assistant_records_full_prompt_trace(mock_get_llm_service, mock_s
     assert mock_finish_trace.called
     start_kwargs = mock_start_trace.call_args.kwargs
     assert start_kwargs["system_prompt"]
-    assert "继续战斗" in str(start_kwargs["messages"][0].content)
+    assert any("继续战斗" in str(message.content) for message in start_kwargs["messages"])
+    assert "<runtime_state" in str(start_kwargs["messages"][0].content)
 
 
 def test_narrative_system_prompt_excludes_combat_only_guidelines():
@@ -309,23 +341,23 @@ def test_narrative_system_prompt_excludes_combat_only_guidelines():
 
     assert "探索代理补充准则" in prompt
     assert "战斗代理补充准则" not in prompt
-    assert "禁止虚构战斗结果" not in prompt
-    assert "回合意识" not in prompt
-    assert "场景单位管理" in prompt
-    assert "避免使用图标、emoji" in prompt
-    assert "不要主动输出玩家角色卡面板" in prompt
+    assert "战斗阶段保持简洁播报" not in prompt
+    assert "工具返回是客观事实来源" in prompt
+    assert "不要使用图标、emoji" in prompt
+    assert "不要主动输出整块角色卡" in prompt
     assert 'action="level_up"' not in prompt
-    assert "character_state_management" in prompt
+    assert "character_state_management" not in prompt
 
 
 def test_combat_system_prompt_includes_combat_only_guidelines():
     prompt = _build_system_prompt({"messages": []}, COMBAT_AGENT_MODE)
 
     assert "战斗代理补充准则" in prompt
-    assert "禁止虚构战斗结果" in prompt
-    assert "回合意识" in prompt
-    assert "怪物回合结算" in prompt
-    assert "不要主动输出玩家角色卡面板" in prompt
+    assert "战斗阶段保持简洁播报" in prompt
+    assert "不要在没有工具结果的情况下描述命中" in prompt
+    assert "不要等待用户继续发话" in prompt
+    assert "工具返回是客观事实来源" in prompt
+    assert "不要主动输出整块角色卡" in prompt
 
 
 def test_combat_assistant_node_invokes_llm_with_monster_turn_directive_and_combat_tools():
@@ -362,6 +394,7 @@ def test_combat_assistant_node_invokes_llm_with_monster_turn_directive_and_comba
     assert llm_call["mode"] == COMBAT_AGENT_MODE
     assert {tool.name for tool in llm_call["tools"]} == {tool.name for tool in get_tool_profile("combat")}
     assert "当前是怪物/NPC Goblin [ID:goblin_1] 的回合" in llm_call["system_prompt"]
+    assert "不要等待用户继续发话" in llm_call["system_prompt"]
     assert "哥布林正试图拖走祭司" in llm_call["system_prompt"]
     assert "start_combat" not in {tool.name for tool in llm_call["tools"]}
 

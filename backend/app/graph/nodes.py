@@ -229,8 +229,8 @@ def combat_resolution_node(state: GraphState) -> dict:
 
 
 def resolve_reaction_node(state: GraphState) -> dict:
-    """继续结算一条已暂停的怪物攻击，并应用玩家的反应选择。"""
-    from app.services.tools._helpers import advance_turn, get_combatant, apply_attack_damage, compute_ac
+    """继续结算一条已暂停的攻击；只处理反应和伤害，不隐式结束行动者回合。"""
+    from app.services.tools._helpers import get_combatant, apply_attack_damage, compute_ac
     from app.services.tools.reactions import execute_player_reaction
 
     combat = state.get("combat")
@@ -298,9 +298,6 @@ def resolve_reaction_node(state: GraphState) -> dict:
     log_lines.extend(atk_lines)
     if hp_change:
         hp_changes.append(hp_change)
-
-    turn_text = advance_turn(combat_dict, player_dict)
-    log_lines.append(turn_text)
 
     result_state: dict = {
         "combat": combat_dict,

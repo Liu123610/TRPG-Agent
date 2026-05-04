@@ -51,6 +51,7 @@ export type ChatResponsePayload = {
   pending_action?: PendingAction | null
   player?: any
   combat?: any
+  space?: any
 }
 
 // SSE 事件回调集
@@ -58,7 +59,7 @@ export interface SSECallbacks {
   onAssistantMessage?: (content: string) => void
   onCombatAction?: (content: string, hpChanges: HpChange[]) => void
   onToolMessage?: (content: string) => void
-  onStateUpdate?: (player: any, combat: any) => void
+  onStateUpdate?: (player: any, combat: any, sceneUnits?: any, deadUnits?: any, space?: any) => void
   onPendingAction?: (action: PendingAction | null) => void
   onDiceRoll?: (rawRoll: number, finalTotal: number) => void | Promise<void>
   onDone?: (sessionId: string) => void
@@ -237,7 +238,7 @@ export const chatService = {
               }
               break
             case 'state_update':
-              callbacks.onStateUpdate?.(parsed.player, parsed.combat)
+              callbacks.onStateUpdate?.(parsed.player, parsed.combat, parsed.scene_units, parsed.dead_units, parsed.space)
               break
             case 'pending_action':
               callbacks.onPendingAction?.(parsed ?? null)
@@ -261,6 +262,8 @@ export const chatService = {
     messages: Array<{ role: string; content: string }>
     player: any
     combat: any
+    space?: any
+    scene_units?: any
   }> {
     const response = await fetch(
       `/api/chat/history?session_id=${encodeURIComponent(sessionId)}&limit=${limit}`

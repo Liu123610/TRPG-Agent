@@ -12,6 +12,11 @@
 - 增加经验：`action="grant_xp"`，传 `payload={"amount": 经验值}`。
 - 玩家升级：`action="level_up"`，不需要额外 payload。
 - 法师学派：`action="choose_arcane_tradition"`，传 `payload={"tradition": "abjuration"}` 或 `{"tradition": "evocation"}`。
+
+## 升级约束
+
+- 当角色是法师且 `action="level_up"` 把等级升到 2 级时，必须立刻继续处理 `action="choose_arcane_tradition"`，直到 `arcane_tradition` 写入之前，不要把这次升级当作已经完成。
+- 法师 2 级的升级结果不完整，除非已经明确写入学派；不要因为 `level_up` 已成功就跳过学派选择。
 - 施加状态：`action="apply_condition"`，传 `payload={"target_id": 目标ID, "condition_id": 状态ID}`，可选 `source_id`、`duration`。
 - 移除状态：`action="remove_condition"`，传 `payload={"target_id": 目标ID, "condition_id": 状态ID}`。
 

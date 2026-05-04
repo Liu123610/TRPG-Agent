@@ -1,4 +1,4 @@
-"""掷骰 + 杂项工具"""
+"""掷骰工具"""
 
 from __future__ import annotations
 
@@ -7,31 +7,6 @@ from typing import Annotated, Literal
 import d20
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
-
-
-@tool
-def weather(city: str, unit: str = "c") -> dict:
-    """获取指定城市的天气信息。
-
-    Args:
-        city: 目标城市名称。
-        unit: 温度单位，支持 "c" (摄氏度) 或 "f" (华氏度)。
-    """
-    normalized_unit = (unit or "c").strip().lower()
-    if normalized_unit not in {"c", "f"}:
-        normalized_unit = "c"
-
-    city_name = (city or "").strip() or "unknown"
-    temperature_c = 22
-    temperature = temperature_c if normalized_unit == "c" else int(temperature_c * 9 / 5 + 32)
-
-    return {
-        "city": city_name,
-        "temperature": temperature,
-        "unit": normalized_unit,
-        "condition": "clear",
-        "source": "mock",
-    }
 
 
 @tool

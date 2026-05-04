@@ -17,6 +17,7 @@ from app.memory.checkpointer import close_checkpointer, get_checkpointer
 from app.memory.episodic_store import EpisodicStore
 from app.memory.ingestion import MemoryIngestionPipeline
 from app.services.llm_service import LLMService
+from app.services.tools._helpers import compute_ac
 from app.utils.agent_trace import trace_chat_error, trace_chat_request, trace_chat_result
 from app.utils.logger import logger
 
@@ -102,13 +103,24 @@ class ChatSessionService:
         
         player_data = None
         combat_data = None
+        space_data = None
+        scene_units_data = None
         if hasattr(state, "values"):
             player = state.values.get("player")
             if player:
                 player_data = player.model_dump() if hasattr(player, "model_dump") else dict(player)
+                player_data["ac"] = compute_ac(player_data)
             combat = state.values.get("combat")
             if combat:
                 combat_data = combat.model_dump() if hasattr(combat, "model_dump") else dict(combat)
+                for unit in combat_data.get("participants", {}).values():
+                    unit["ac"] = compute_ac(unit)
+            space = state.values.get("space")
+            if space:
+                space_data = space.model_dump() if hasattr(space, "model_dump") else dict(space)
+            scene_units = state.values.get("scene_units")
+            if scene_units:
+                scene_units_data = self._mapping_state_to_dict(scene_units)
 
         reply = self._extract_reply_from_messages(new_messages)
         pending_action = self._get_pending_action(state)
@@ -134,6 +146,8 @@ class ChatSessionService:
             "pending_action": pending_action,
             "player": player_data,
             "combat": combat_data,
+            "space": space_data,
+            "scene_units": scene_units_data,
         }
 
     def _get_pending_action(self, state: Any) -> Optional[dict]:
@@ -217,6 +231,7 @@ class ChatSessionService:
             "combat": self._state_value_to_dict(values.get("combat")),
             "scene_units": self._mapping_state_to_dict(values.get("scene_units")),
             "dead_units": self._mapping_state_to_dict(values.get("dead_units")),
+            "space": self._state_value_to_dict(values.get("space")),
             "pending_reaction": self._state_value_to_dict(values.get("pending_reaction")),
         }
 
@@ -486,25 +501,33 @@ class ChatSessionService:
         combat_data = None
         scene_units_data = None
         dead_units_data = None
+        space_data = None
         if hasattr(state, "values"):
             player = state.values.get("player")
             if player:
                 player_data = player.model_dump() if hasattr(player, "model_dump") else dict(player)
+                player_data["ac"] = compute_ac(player_data)
             combat = state.values.get("combat")
             if combat:
                 combat_data = combat.model_dump() if hasattr(combat, "model_dump") else dict(combat)
+                for unit in combat_data.get("participants", {}).values():
+                    unit["ac"] = compute_ac(unit)
             scene_units = state.values.get("scene_units")
             if scene_units:
                 scene_units_data = {k: v.model_dump() if hasattr(v, "model_dump") else dict(v) for k, v in scene_units.items()} if hasattr(scene_units, "items") else scene_units
             dead_units = state.values.get("dead_units")
             if dead_units:
                 dead_units_data = {k: v.model_dump() if hasattr(v, "model_dump") else dict(v) for k, v in dead_units.items()} if hasattr(dead_units, "items") else dead_units
+            space = state.values.get("space")
+            if space:
+                space_data = space.model_dump() if hasattr(space, "model_dump") else dict(space)
 
         yield self._sse_event("state_update", {
             "player": player_data,
             "combat": combat_data,
             "scene_units": scene_units_data,
             "dead_units": dead_units_data,
+            "space": space_data,
         })
 
         pending = self._get_pending_action(state)
@@ -556,15 +579,32 @@ class ChatSessionService:
 
         player_data = None
         combat_data = None
+        space_data = None
+        scene_units_data = None
         if hasattr(state, "values"):
             player = state.values.get("player")
             if player:
                 player_data = player.model_dump() if hasattr(player, "model_dump") else dict(player)
+                player_data["ac"] = compute_ac(player_data)
             combat = state.values.get("combat")
             if combat:
                 combat_data = combat.model_dump() if hasattr(combat, "model_dump") else dict(combat)
+                for unit in combat_data.get("participants", {}).values():
+                    unit["ac"] = compute_ac(unit)
+            space = state.values.get("space")
+            if space:
+                space_data = space.model_dump() if hasattr(space, "model_dump") else dict(space)
+            scene_units = state.values.get("scene_units")
+            if scene_units:
+                scene_units_data = self._mapping_state_to_dict(scene_units)
 
-        return {"messages": history, "player": player_data, "combat": combat_data}
+        return {
+            "messages": history,
+            "player": player_data,
+            "combat": combat_data,
+            "space": space_data,
+            "scene_units": scene_units_data,
+        }
 
 
 async def get_chat_session_service() -> ChatSessionService:

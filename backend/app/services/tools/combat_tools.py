@@ -11,6 +11,7 @@ from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 
 from app.calculation.bestiary import spawn_combatants
+from app.space.geometry import build_space_state
 from app.services.tools._helpers import (
     advance_turn,
     apply_hp_change,
@@ -18,10 +19,12 @@ from app.services.tools._helpers import (
     build_attack_roll_event_payload,
     build_pending_reaction_state,
     clear_player_combat_fields,
+    choose_attack,
     get_all_combatants,
     get_combatant,
     prepare_player_for_combat,
     roll_attack_hit,
+    validate_attack_distance,
 )
 from app.services.tools.reactions import get_available_reactions
 
@@ -54,6 +57,35 @@ def _build_combat_archive(summary: str, start_index: int, end_index: int) -> dic
         "start_index": safe_start,
         "end_index": safe_end,
     }
+
+
+def _remove_space_units(space_raw: dict | None, unit_ids: list[str]) -> dict | None:
+    """战斗收尾时把尸体从空间落点里真正移除，避免地图上只剩“摆角落”的假清理。"""
+    if not space_raw:
+        return None
+
+    space = build_space_state(space_raw)
+    for unit_id in unit_ids:
+        space.placements.pop(unit_id, None)
+    return space.model_dump()
+
+
+def _validate_combat_space(state: dict, unit_ids: list[str]) -> str | None:
+    """战斗必须绑定客观地图，否则距离、移动和范围规则会失去事实来源。"""
+    space = build_space_state(state.get("space"))
+    if not space.maps or not space.active_map_id or space.active_map_id not in space.maps:
+        return "无法开始战斗：当前没有可用平面地图。请先用 manage_space 创建或切换地图，并放置参战单位。"
+
+    missing = [unit_id for unit_id in unit_ids if unit_id not in space.placements]
+    if missing:
+        return f"无法开始战斗：以下参战单位尚未放置到当前平面地图: {', '.join(missing)}。请先用 manage_space 放置单位。"
+
+    wrong_map = [unit_id for unit_id in unit_ids if space.placements[unit_id].map_id != space.active_map_id]
+    if wrong_map:
+        active_map = space.maps[space.active_map_id]
+        return f"无法开始战斗：以下参战单位不在当前地图 {active_map.name} [ID:{space.active_map_id}]: {', '.join(wrong_map)}。请先切换地图或重新放置单位。"
+
+    return None
 
 
 @tool
@@ -152,6 +184,9 @@ def start_combat(
     if player_dict:
         all_units[player_dict["id"]] = player_dict
 
+    if space_error := _validate_combat_space(state, list(all_units)):
+        return Command(update={"messages": [ToolMessage(content=space_error, tool_call_id=tool_call_id)]})
+
     initiative_list: list[tuple[str, int]] = []
     for uid, p in all_units.items():
         dex_mod = p.get("modifiers", {}).get("dex", 0)
@@ -241,6 +276,10 @@ def attack_action(
     if not attacker.get("action_available", True):
         return _reject(f"{attacker.get('name', attacker_id)} 本回合的动作已用尽。")
 
+    chosen_attack = choose_attack(attacker, attack_name)
+    if distance_error := validate_attack_distance(state.get("space"), attacker_id, target_id, chosen_attack):
+        return _reject(distance_error)
+
     roll_info = roll_attack_hit(attacker, target, attack_name, advantage)
 
     if (
@@ -312,7 +351,7 @@ def next_turn(
     state: Annotated[dict, InjectedState] = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = None,
 ) -> Command:
-    """推进到下一个行动者的回合。如果所有人都行动过，则进入新的回合。"""
+    """结束当前行动者回合，并推进到下一个存活单位。如果所有人都行动过，则进入新的回合。"""
     combat_raw = state.get("combat")
     if not combat_raw:
         return "当前不在战斗中。"
@@ -394,6 +433,13 @@ def end_combat(
         if fallen_names:
             parts.append(f"倒下: {', '.join(fallen_names)}")
         summary = " ".join(parts)
+
+        dead_unit_ids = list(dead_raw.keys())
+        if dead_unit_ids:
+            space_raw = state.get("space")
+            cleaned_space = _remove_space_units(space_raw, dead_unit_ids)
+            if cleaned_space is not None:
+                update["space"] = cleaned_space
 
         update["scene_units"] = scene_raw
         update["dead_units"] = dead_raw

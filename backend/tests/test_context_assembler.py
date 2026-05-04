@@ -1,9 +1,9 @@
 import unittest
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.graph.constants import COMBAT_AGENT_MODE, NARRATIVE_AGENT_MODE
-from app.memory.context_assembler import ContextAssembler
+from app.memory.context_assembler import ContextAssembler, summarize_tool_message
 
 
 class _StaticContextProvider:
@@ -24,12 +24,21 @@ class ContextAssemblerTests(unittest.TestCase):
         assembled = assembler.assemble(state, NARRATIVE_AGENT_MODE, base_system_prompt="基础规则")
 
         self.assertIn("玩家刚踏入地牢入口。", assembled.system_prompt)
-        self.assertIn("[可按需加载的技能]", assembled.system_prompt)
-        self.assertIn("character_state_management", assembled.system_prompt)
+        self.assertNotIn("[可按需加载的技能]", assembled.system_prompt)
+        self.assertNotIn("character_state_management", assembled.system_prompt)
         self.assertIn("[扩展上下文]", assembled.system_prompt)
         self.assertIn("外部上下文:narrative", assembled.system_prompt)
-        self.assertIn("实时系统监控窗", assembled.hud_text)
-        self.assertIn("实时系统监控窗", assembled.model_input_messages[-1].content)
+        self.assertIn("状态快照", assembled.hud_text)
+        self.assertIsInstance(assembled.model_input_messages[-2], SystemMessage)
+        self.assertIn("<runtime_state", assembled.model_input_messages[-2].content)
+        self.assertIn('source="hud"', assembled.model_input_messages[-2].content)
+        self.assertIn('visibility="model_only"', assembled.model_input_messages[-2].content)
+        self.assertNotIn("复述", assembled.model_input_messages[-2].content)
+        self.assertNotIn("解释", assembled.model_input_messages[-2].content)
+        self.assertIn("状态快照", assembled.model_input_messages[-2].content)
+        self.assertEqual("我看看四周。", assembled.model_input_messages[-1].content)
+        self.assertIn("[当前平面空间]", assembled.hud_text)
+        self.assertIn("当前没有平面地图", assembled.hud_text)
 
     def test_episodic_context_precedes_summary_fallback(self):
         assembler = ContextAssembler()
@@ -79,6 +88,61 @@ class ContextAssemblerTests(unittest.TestCase):
         self.assertIn("[战斗简报]", assembled.system_prompt)
         self.assertIn("[当前回合指令]", assembled.system_prompt)
         self.assertIn("Goblin", assembled.system_prompt)
+
+    def test_hud_includes_planar_space_summary(self):
+        assembler = ContextAssembler()
+        state = {
+            "messages": [HumanMessage(content="我观察站位。")],
+            "space": {
+                "active_map_id": "map_hall",
+                "maps": {
+                    "map_hall": {
+                        "id": "map_hall",
+                        "name": "大厅",
+                        "width": 80,
+                        "height": 60,
+                        "grid_size": 5,
+                    }
+                },
+                "placements": {
+                    "goblin_1": {
+                        "unit_id": "goblin_1",
+                        "map_id": "map_hall",
+                        "position": {"x": 10, "y": 15},
+                        "facing_deg": 90,
+                    }
+                },
+            },
+        }
+
+        assembled = assembler.assemble(state, NARRATIVE_AGENT_MODE, base_system_prompt="基础规则")
+
+        self.assertIn("[当前平面空间]", assembled.hud_text)
+        self.assertIn("大厅", assembled.hud_text)
+        self.assertIn("当前地图单位坐标", assembled.hud_text)
+        self.assertIn("goblin_1: (10, 15)", assembled.hud_text)
+
+    def test_inspect_unit_tool_projection_keeps_structured_character_facts(self):
+        tool_message = ToolMessage(
+            content=(
+                "[玩家角色] player_hero 完整信息:\n"
+                '{"id":"player_hero","name":"英雄","role_class":"法师","level":2,'
+                '"hp":8,"max_hp":12,"resources":{"spell_slot_lv1":1},'
+                '"conditions":[{"id":"arcane_ward","extra":{"ward_hp":7}}],'
+                '"known_spells":["magic_missile","shield"],'
+                '"long_notes":"这段冗长说明不应挤掉关键结构字段"}'
+            ),
+            tool_call_id="call_1",
+            name="inspect_unit",
+        )
+
+        projected = summarize_tool_message(tool_message)
+
+        self.assertIn("[工具:inspect_unit]", projected)
+        self.assertIn("spell_slot_lv1", projected)
+        self.assertIn("magic_missile", projected)
+        self.assertIn("arcane_ward", projected)
+        self.assertIn("long_notes", projected)
 
 
 if __name__ == "__main__":

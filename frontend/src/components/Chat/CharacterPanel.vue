@@ -13,6 +13,13 @@
     </div>
 
     <div class="panel-scrollable-content">
+      <SpaceMap
+        :space="space"
+        :player="player"
+        :combat="combat"
+        :scene-units="sceneUnits"
+      />
+
       <!-- 视图 A：详细角色状态 -->
       <div v-if="viewMode === 'character'">
         <div v-if="player" class="character-stats">
@@ -167,13 +174,16 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
 import HpBar from './HpBar.vue'
+import SpaceMap from './SpaceMap.vue'
 import { ArrowLeftRight } from 'lucide-vue-next'
 import { useCharacterState, type PlayerState, ABILITY_LIST, formatConditionName } from '../../Services_/characterStateService'
-import { translateWeaponName, translateSpellName, translateItemName, translateResourceName } from '../../Services_/nameTranslator'
+import { translateWeaponName, translateSpellName, translateResourceName } from '../../Services_/nameTranslator'
 
 const props = defineProps<{
   externalPlayer: PlayerState | null
   combat?: any | null
+  space?: any | null
+  sceneUnits?: Record<string, any> | null
 }>()
 
 const {

@@ -20,4 +20,4 @@ class ChatResponse(BaseModel):
     pending_action: Optional[dict] = Field(default=None, description="Action required from the user before continuing")
     player: Optional[PlayerState] = Field(default=None, description="Player state")
     combat: Optional[dict] = Field(default=None, description="Combat state")
-
+    space: Optional[dict] = Field(default=None, description="Planar space state")

@@ -52,18 +52,54 @@ def _parse_attacks(actions: list[dict] | None) -> list[AttackInfo]:
     result = []
     for action in actions:
         bonus = action.get("attack_bonus")
-        if bonus is None:
+        desc = action.get("desc", "")
+        if bonus is None or not _is_weapon_attack(desc):
             continue
 
         # Open5e 可能直接给出完整公式，也可能拆成 damage_dice + damage_bonus。
         damage_dice = _build_damage_formula(action)
+        normal_range, long_range = _extract_range(action)
         result.append(AttackInfo(
             name=action.get("name", "Attack"),
             attack_bonus=int(bonus),
             damage_dice=damage_dice,
             damage_type=_extract_damage_type(action),
+            reach_feet=_extract_reach(action),
+            normal_range_feet=normal_range,
+            long_range_feet=long_range,
         ))
     return result
+
+
+def _is_weapon_attack(desc: str) -> bool:
+    """只把真正的武器攻击收进 AttackInfo，喷吐等豁免 AoE 交给法术/能力系统。"""
+    return "weapon attack" in desc.lower()
+
+
+def _extract_reach(action: dict) -> int:
+    """从动作描述中提取近战触及距离，默认 5 尺。"""
+    import re
+
+    desc = action.get("desc", "")
+    match = re.search(r"reach\s+(\d+)\s*ft", desc, flags=re.IGNORECASE)
+    return int(match.group(1)) if match else 5
+
+
+def _extract_range(action: dict) -> tuple[int | None, int | None]:
+    """从 Open5e 动作描述中提取远程武器的普通/极限射程。"""
+    import re
+
+    desc = action.get("desc", "")
+    match = re.search(r"range\s+(\d+)\s*/\s*(\d+)\s*ft", desc, flags=re.IGNORECASE)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+
+    match = re.search(r"range\s+(\d+)\s*ft", desc, flags=re.IGNORECASE)
+    if match:
+        distance = int(match.group(1))
+        return distance, distance
+
+    return None, None
 
 
 def _build_damage_formula(action: dict) -> str:

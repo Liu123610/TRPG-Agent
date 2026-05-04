@@ -72,6 +72,8 @@
         ref="characterPanelRef"
         :external-player="playerState"
         :combat="combatState"
+        :space="spaceState"
+        :scene-units="sceneUnitsState"
       />
     </div>
 
@@ -123,6 +125,8 @@ const {
   errorText,
   isSending,
   combatState,
+  spaceState,
+  sceneUnitsState,
   playerState,
   debugMode,
   addUserMessage,
@@ -133,6 +137,8 @@ const {
   setPendingAction,
   setPlayerState,
   setCombatState,
+  setSpaceState,
+  setSceneUnitsState,
   setError,
   setSending,
   clearError,
@@ -178,6 +184,8 @@ const { sendTextMessage, confirmDiceRoll, respondToPlayerDeath, respondToReactio
   setPendingAction,
   setPlayerState,
   setCombatState,
+  setSpaceState,
+  setSceneUnitsState,
   setError,
   setSending,
   clearError,
@@ -236,6 +244,8 @@ onMounted(async () => {
       }
       if (history.player) setPlayerState(history.player)
       if (history.combat) setCombatState(history.combat)
+      if ((history as any).space) setSpaceState((history as any).space)
+      if ((history as any).scene_units) setSceneUnitsState((history as any).scene_units)
     } catch {
       // 忽略错误
     }

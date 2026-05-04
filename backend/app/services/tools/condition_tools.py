@@ -11,7 +11,7 @@ from langgraph.types import Command
 
 from app.conditions import get_condition_def, has_condition, list_condition_defs, remove_condition_by_id, upsert_condition
 from app.conditions._base import create_condition
-from app.services.tools._helpers import get_combatant, sync_movement_state
+from app.services.tools._helpers import get_combatant, sync_ac_state, sync_movement_state
 
 
 def _locate_target(state: dict, target_id: str) -> tuple[dict | None, dict, str]:
@@ -117,6 +117,7 @@ def apply_condition(
         target,
         create_condition(condition_id, source_id=source_id, duration=duration),
     )
+    sync_ac_state(target)
     sync_movement_state(target)
 
     # 状态元数据用于日志
@@ -164,6 +165,7 @@ def remove_condition(
         ]})
 
     remove_condition_by_id(target, condition_id)
+    sync_ac_state(target)
     sync_movement_state(target)
 
     cdef = get_condition_def(condition_id)

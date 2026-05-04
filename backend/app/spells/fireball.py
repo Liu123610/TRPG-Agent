@@ -10,6 +10,7 @@ SPELL_DEF: SpellDef = {
     "school": "evocation",
     "casting_time": "action",
     "range": "150 feet (20-foot radius sphere)",
+    "area": {"shape": "circle", "radius": 20},
     "description": "目标点周围半径20尺球状区域内的每个生物必须进行敏捷豁免。失败受8d6点火焰伤害，成功减半。升环每高一环伤害增加1d6。",
 }
 

@@ -25,6 +25,8 @@ export function useChatMessages() {
   const isStreaming = ref(false)
   const playerState = ref<any | null>(null)
   const combatState = ref<any | null>(null)
+  const spaceState = ref<any | null>(null)
+  const sceneUnitsState = ref<Record<string, any> | null>(null)
   const debugMode = ref(false)
 
   let currentStreamingMessageId: string | null = null
@@ -143,6 +145,14 @@ export function useChatMessages() {
     combatState.value = state
   }
 
+  const setSpaceState = (state: any) => {
+    spaceState.value = state
+  }
+
+  const setSceneUnitsState = (state: Record<string, any> | null) => {
+    sceneUnitsState.value = state
+  }
+
   const setMessages = (msgs: ChatMessage[]) => {
     stopLoading()  // 清除 loading
     messages.value = msgs.map((msg) => ({
@@ -166,6 +176,8 @@ export function useChatMessages() {
     isStreaming,
     playerState,
     combatState,
+    spaceState,
+    sceneUnitsState,
     debugMode,
     addUserMessage,
     addAssistantMessage,
@@ -178,6 +190,8 @@ export function useChatMessages() {
     clearError,
     setPlayerState,
     setCombatState,
+    setSpaceState,
+    setSceneUnitsState,
     setMessages,
     toggleDebugMode,
     startLoading,

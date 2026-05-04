@@ -3,8 +3,8 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "dev": "concurrently \"cd frontend && pnpm dev\" \"cd backend && .venv\\Scripts\\python.exe -m uvicorn app.main:app\"",
-    "dev:frontend": "cd frontend && pnpm dev",
+    "dev": "concurrently --names frontend,backend --prefix-colors cyan,magenta \"pnpm dev:frontend\" \"pnpm dev:backend\"",
+    "dev:frontend": "cd frontend && set CI=true&& pnpm exec vite --clearScreen false",
     "dev:backend": "cd backend && .venv\\Scripts\\python.exe -m uvicorn app.main:app"
   },
   "devDependencies": {

@@ -13,8 +13,26 @@ from langgraph.types import Command
 from app.calculation.abilities import ability_to_modifier
 from app.calculation.predefined_characters import PREDEFINED_CHARACTERS
 from app.conditions import remove_condition_by_id, upsert_condition
-from app.services.tools._helpers import apply_hp_change, get_combatant, sync_movement_state
+from app.services.skills import load_skill_content
+from app.services.tools._helpers import apply_hp_change, compute_ac, get_combatant, sync_ac_state, sync_movement_state
 
+
+_STATE_CHANGE_KEYS = frozenset({
+    "hp_delta",
+    "set_hp",
+    "ac",
+    "speed",
+    "abilities",
+    "add_condition",
+    "remove_condition",
+    "resource_delta",
+    "set_resource",
+})
+
+_STATE_CHANGE_KEY_HINTS = {
+    "hp": "HP 请使用 set_hp（设为指定值）或 hp_delta（增减值）",
+    "resources": "资源请使用 set_resource（设为指定值/上限）或 resource_delta（增减值）",
+}
 
 
 def _get_resource_caps(target: dict, player_dict: dict | None = None) -> dict[str, int]:
@@ -69,6 +87,7 @@ def modify_character_state(
     target_id: str = "player",
     changes: dict | None = None,
     action: Literal[
+        "help",
         "update",
         "grant_xp",
         "level_up",
@@ -81,31 +100,23 @@ def modify_character_state(
     state: Annotated[dict, InjectedState] = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = None,
 ) -> Command:
-    """角色状态调整技能。所有涉及 HP、AC、能力值、资源、经验、升级、学派、状态效果的变化都应通过该工具执行。
-
-    使用方式：
-    - action="update"：通用状态变更，填写 target_id 与 changes。
-    - action="grant_xp"：增加经验，payload={"amount": 50}。
-    - action="level_up"：玩家升级，系统按职业升级表结算。
-    - action="choose_arcane_tradition"：法师选择学派，payload={"tradition": "abjuration"}。
-    - action="apply_condition"：施加状态，payload={"target_id": "goblin_1", "condition_id": "blinded", "duration": 2}。
-    - action="remove_condition"：移除状态，payload={"target_id": "goblin_1", "condition_id": "blinded"}。
-
-    支持的 changes 键包括：hp_delta(增减HP)、set_hp(直接设置HP)、ac、speed、
-    abilities(dict)、conditions(list)、add_condition(str 或 dict)、remove_condition(str)、
-    resource_delta(dict, 如 {"spell_slot_lv1": -1} 增减资源)、set_resource(dict, 直接设置资源值) 等。
-    对于资源恢复，系统会优先参考角色模板中的默认上限进行截断；set_resource 也可传 "max" 表示恢复到上限。
-    对于 HP 变化，优先使用 hp_delta（正=治疗, 负=伤害）以确保边界安全。
-    add_condition 接受状态 ID 字符串（如 "blinded"）或完整字典（如 {"id": "charmed", "source_id": "goblin_1", "duration": 3}）。
+    """角色状态调整技能。用于 HP/AC/能力值/资源/经验/升级/学派/状态效果等客观状态变化。
+    如不确定 action、changes 或 payload 的写法，先用 action="help" 查看完整技能说明。
 
     Args:
-        target_id: 目标单位 ID（如 "player_预设-战士"、"goblin_1"）或 "player" 表示当前玩家。
-        changes: 要修改的属性字典，如 {"hp_delta": -5} 或 {"ac": 18, "add_condition": "blinded"}。
-        action: 本次状态调整的技能动作，默认 update。
-        payload: action 专属参数；经验、升级、学派和状态效果优先放在这里。
-        reason: 修改原因的简短描述，用于日志。
+        target_id: 目标单位 ID，或 "player" 表示当前玩家。
+        changes: action="update" 时的状态变更字典。
+        action: 状态调整动作；用 "help" 获取完整说明。
+        payload: 非 update 动作的参数。
+        reason: 修改原因。
     """
     payload = payload or {}
+
+    # 复杂状态调整的完整说明由同一工具按需返回，避免额外暴露 load_skill。
+    if action == "help":
+        return Command(update={"messages": [
+            ToolMessage(content=load_skill_content("character_state_management"), tool_call_id=tool_call_id)
+        ]})
 
     # 角色成长类动作收口在同一个工具里，减少模型可见工具数量。
     if action == "grant_xp":
@@ -132,8 +143,23 @@ def modify_character_state(
 
     changes = changes or {}
     if not changes:
+        extra = " action=\"update\" 的状态变更请写入 changes，而不是 payload。" if payload else ""
         return Command(update={"messages": [
-            ToolMessage(content="未提供状态变更内容。", tool_call_id=tool_call_id)
+            ToolMessage(content=f"未提供状态变更内容。{extra}", tool_call_id=tool_call_id)
+        ]})
+
+    invalid_keys = sorted(set(changes) - _STATE_CHANGE_KEYS)
+    if invalid_keys:
+        hints = [hint for key, hint in _STATE_CHANGE_KEY_HINTS.items() if key in invalid_keys]
+        hint_text = f"\n常见修正: {'；'.join(hints)}。" if hints else ""
+        return Command(update={"messages": [
+            ToolMessage(
+                content=(
+                    f"状态变更参数无效：未知 changes 字段 {', '.join(invalid_keys)}。"
+                    f"{hint_text}\n本次未执行任何状态修改；使用 action=\"help\" 查看完整说明。"
+                ),
+                tool_call_id=tool_call_id,
+            )
         ]})
 
     update: dict = {}
@@ -217,11 +243,13 @@ def modify_character_state(
         raw = changes["add_condition"]
         new_cond, _ = upsert_condition(target, raw)
         cond_id = new_cond["id"]
+        sync_ac_state(target)
         sync_movement_state(target)
         lines.append(f"  {target_name} +状态: {cond_id}")
     if "remove_condition" in changes:
         cond_id = changes["remove_condition"]
         remove_condition_by_id(target, cond_id)
+        sync_ac_state(target)
         sync_movement_state(target)
         lines.append(f"  {target_name} -状态: {cond_id}")
 
@@ -330,6 +358,9 @@ def inspect_unit(
             ToolMessage(content=f"找不到单位 '{target_id}'。", tool_call_id=tool_call_id)
         ]})
 
+    if isinstance(result, dict):
+        result["ac"] = compute_ac(result)
+
     content = f"[{source}] {target_id} 完整信息:\n{json.dumps(result, ensure_ascii=False, indent=2)}"
     return Command(update={"messages": [ToolMessage(content=content, tool_call_id=tool_call_id)]})
 
@@ -342,13 +373,13 @@ from app.services.tools._helpers import XP_THRESHOLDS
 _WIZARD_LEVEL_TABLE: dict[int, dict] = {
     1: {
         "spell_slots": {"spell_slot_lv1": 2},
-        "known_spells": ["magic_missile", "shield"],
+        "known_spells": ["magic_missile", "mage_armor"],
         "known_cantrips": ["fire_bolt", "toll_the_dead", "ray_of_frost"],
         "class_features": [],
     },
     2: {
         "spell_slots": {"spell_slot_lv1": 3},
-        "new_spells": ["ice_knife"],
+        "new_spells": ["shield"],
         "class_features": ["arcane_recovery"],
         "choose_tradition": True,  # 升到 2 级时选择奥术传承
     },
@@ -404,8 +435,8 @@ def _apply_wizard_level_up(player_dict: dict, new_level: int) -> list[str]:
 
     # 奥术传承选择提示
     if table.get("choose_tradition") and not player_dict.get("arcane_tradition"):
-        lines.append("  [可选择奥术传承：塑能学派(evocation) / 防护学派(abjuration)]")
-        lines.append('  使用 modify_character_state，action="choose_arcane_tradition" 进行选择')
+        lines.append("  [必须选择奥术传承：塑能学派(evocation) / 防护学派(abjuration)]")
+        lines.append('  先使用 modify_character_state，action="choose_arcane_tradition" 完成选择，再继续后续流程')
 
     # 熟练加值
     from app.calculation.proficiency import calculate_proficiency_bonus

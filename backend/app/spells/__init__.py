@@ -27,6 +27,7 @@ SPELL_REGISTRY: dict[str, ModuleType] = {
     "guiding_bolt": guiding_bolt,
     "thunderwave": thunderwave,
     "mage_armor": mage_armor,
+    "fireball": fireball,
     # 2 环
     "mirror_image": mirror_image,
     "hold_person": hold_person,

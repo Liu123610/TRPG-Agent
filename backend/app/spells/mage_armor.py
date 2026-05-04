@@ -4,6 +4,7 @@ AC 提升效果由 conditions/mage_armor.py 的 modify_ac 钩子在 compute_ac()
 本法术只负责在目标身上挂载 mage_armor 条件。"""
 
 from app.conditions._base import create_condition, has_condition
+from app.services.tools._helpers import sync_ac_state
 from app.spells._base import SpellDef, SpellResult
 
 SPELL_DEF: SpellDef = {
@@ -31,5 +32,7 @@ def execute(caster: dict, targets: list[dict], slot_level: int, **kwargs) -> Spe
         lines.append(f"{target_name} 获得了【法师护甲】状态（AC 至少为 13 + DEX 修正）。")
     else:
         lines.append(f"{target_name} 身上的【法师护甲】被刷新。")
+
+    sync_ac_state(target)
 
     return {"lines": lines}

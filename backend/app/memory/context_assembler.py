@@ -7,11 +7,11 @@ from copy import copy
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.graph.constants import COMBAT_AGENT_MODE, NARRATIVE_AGENT_MODE
 from app.graph.state import GraphState
-from app.services.skills import get_skill_index
+from app.services.tools._helpers import compute_ac
 
 
 COMBAT_ARCHIVE_MESSAGE_PREFIX = "[系统:战斗归档]"
@@ -52,9 +52,6 @@ class ContextAssembler:
 
     def build_system_prompt(self, state: GraphState, mode: str, base_system_prompt: str) -> str:
         system_prompt = base_system_prompt
-        skill_index = self._build_skill_index()
-        if skill_index:
-            system_prompt += f"\n\n[可按需加载的技能]\n{skill_index}"
 
         episodic_context = [item.strip() for item in state.get("episodic_context", []) if isinstance(item, str) and item.strip()]
         if episodic_context:
@@ -76,16 +73,6 @@ class ContextAssembler:
             system_prompt += "\n\n[扩展上下文]\n" + "\n\n".join(block for block in external_blocks if block)
 
         return system_prompt
-
-    def _build_skill_index(self) -> str:
-        """只注入技能索引；完整说明由 load_skill 工具按需返回。"""
-        lines = [
-            f"- {skill.skill_id}: {skill.description}"
-            for skill in get_skill_index()
-        ]
-        if lines:
-            lines.append("遇到对应复杂工具前，先调用 load_skill(skill_id) 读取完整说明。")
-        return "\n".join(lines)
 
     def build_hud_text(self, state: GraphState) -> str:
         sections: list[str] = []
@@ -110,9 +97,10 @@ class ContextAssembler:
             for uid, combatant in participants.items():
                 attacks_desc = format_attacks(combatant)
                 marker = " ← 当前行动" if uid == current_id else ""
+                display_ac = compute_ac(combatant) if isinstance(combatant, dict) else combatant.get('ac')
                 combat_lines.append(
                     f"  {combatant.get('name', uid)} [ID:{uid}] side={combatant.get('side')} "
-                    f"HP:{combatant.get('hp')}/{combatant.get('max_hp')} AC:{combatant.get('ac')} "
+                    f"HP:{combatant.get('hp')}/{combatant.get('max_hp')} AC:{display_ac} "
                     f"conditions=[{format_conditions(combatant)}] attacks=[{attacks_desc}]{marker}"
                 )
             sections.append("[当前战斗状态]\n" + "\n".join(combat_lines))
@@ -125,12 +113,15 @@ class ContextAssembler:
             ]
             sections.append("[场景单位池（可用 start_combat 指定参战）]\n" + "\n".join(scene_lines))
 
+        space_data = state_value_to_dict(state.get("space"))
+        sections.append("[当前平面空间]\n" + format_space_summary(space_data))
+
         dead_data = dump_mapping_state(state.get("dead_units"))
         if dead_data:
             dead_lines = [f"  {uid}: {unit.get('name', uid)}" for uid, unit in dead_data.items()]
             sections.append("[死亡单位档案]\n" + "\n".join(dead_lines))
 
-        return "\n\n=== 实时系统监控窗(HUD) ===\n" + "\n\n".join(sections) + "\n===========================\n"
+        return "\n\n=== 状态快照 ===\n" + "\n\n".join(sections) + "\n===========================\n"
 
     def build_model_input_messages(self, state: GraphState, mode: str, hud_text: str) -> list[BaseMessage]:
         source_messages = collapse_archived_combat_messages(
@@ -154,7 +145,7 @@ class ContextAssembler:
 
             projected_messages.append(message)
 
-        return append_hud_to_latest_message(projected_messages, hud_text)
+        return insert_runtime_hud_message(projected_messages, hud_text)
 
     def _build_combat_brief(self, state: GraphState) -> str:
         combat_dict = state_value_to_dict(state.get("combat"))
@@ -179,9 +170,10 @@ class ContextAssembler:
         player_side: list[str] = []
         enemy_side: list[str] = []
         for uid, combatant in participants.items():
+            display_ac = compute_ac(combatant) if isinstance(combatant, dict) else combatant.get('ac')
             status = (
                 f"{combatant.get('name', uid)}[HP:{combatant.get('hp')}/{combatant.get('max_hp')}, "
-                f"AC:{combatant.get('ac')}, conditions:{format_conditions(combatant)}, "
+                f"AC:{display_ac}, conditions:{format_conditions(combatant)}, "
                 f"attacks:{format_attacks(combatant)}]"
             )
             if combatant.get("side") == "player":
@@ -213,13 +205,16 @@ class ContextAssembler:
         if current_actor.get("side") == "player":
             return (
                 f"当前是玩家单位 {current_name} [ID:{current_id}] 的回合。"
-                "根据玩家最新意图调用合适工具；若本回合已无合理动作，再调用 next_turn。"
+                "根据玩家最新意图调用合适工具；若本回合已无合理动作，调用 next_turn 结束当前行动者回合。"
             )
 
         return (
             f"当前是怪物/NPC {current_name} [ID:{current_id}] 的回合。"
-            "你必须直接为其选择一个合法目标和攻击或法术并调用工具；"
-            "若动作已用尽、被状态阻止，或已无存活敌人，则立即调用 next_turn。"
+            "你必须立刻为其选择一个可执行动作并调用工具，不要等待用户继续发话；"
+            "若需要接近目标，优先调用 manage_space(action=\"approach_unit\") 一步靠近到合适距离，"
+            "不要反复测距或手算坐标；"
+            "不要只用文字宣告换人；当你判断该单位本回合可做且应做的事情都完成后，"
+            "必须调用 next_turn 结束当前行动者回合。"
         )
 
 
@@ -294,32 +289,36 @@ def normalize_combat_archives(combat_archives: list[dict[str, Any]] | None, mess
     return normalized
 
 
-def append_hud_to_latest_message(messages: list[BaseMessage], hud_text: str) -> list[BaseMessage]:
+# 将 HUD 作为临近当前轮次的系统消息注入，避免被模型误读成玩家发言。
+def insert_runtime_hud_message(messages: list[BaseMessage], hud_text: str) -> list[BaseMessage]:
+    hud_message = SystemMessage(content=format_runtime_hud_content(hud_text))
     if not messages:
-        return []
+        return [hud_message]
 
     projected_messages = list(messages)
-    projected_messages[-1] = clone_message_with_content(
-        projected_messages[-1],
-        append_text_content(projected_messages[-1].content, hud_text),
+    latest_message = projected_messages[-1]
+    if isinstance(latest_message, HumanMessage) and not is_internal_system_human_message(latest_message):
+        return [*projected_messages[:-1], hud_message, latest_message]
+
+    return [*projected_messages, hud_message]
+
+
+def format_runtime_hud_content(hud_text: str) -> str:
+    return (
+        "<runtime_state source=\"hud\" visibility=\"model_only\" role=\"state_snapshot\" audience=\"none\">\n"
+        f"{hud_text}"
+        "</runtime_state>"
     )
-    return projected_messages
+
+
+def is_internal_system_human_message(message: HumanMessage) -> bool:
+    return isinstance(message.content, str) and message.content.startswith("[系统")
 
 
 def clone_message_with_content(message: BaseMessage, content: Any) -> BaseMessage:
     cloned_message = copy(message)
     cloned_message.content = content
     return cloned_message
-
-
-def append_text_content(content: Any, extra_text: str) -> Any:
-    if isinstance(content, str):
-        return content + extra_text
-    if isinstance(content, list):
-        appended_content = list(content)
-        appended_content.append({"type": "text", "text": extra_text})
-        return appended_content
-    return f"{content}{extra_text}"
 
 
 def message_content_to_text(content: Any) -> str:
@@ -352,16 +351,54 @@ def format_attacks(combatant: dict[str, Any]) -> str:
     return ", ".join(attack.get("name", "?") for attack in attacks)
 
 
+def format_space_summary(space: dict[str, Any]) -> str:
+    """把空间状态压缩成 HUD 可读文本，避免模型吞下整份 JSON。"""
+    if not space or not space.get("maps"):
+        return "当前没有平面地图。探索或战斗若涉及位置、距离、范围、入场或移动，应先用 manage_space 建立地图并放置相关单位。"
+
+    active_map_id = space.get("active_map_id", "")
+    maps = space.get("maps", {}) or {}
+    placements = space.get("placements", {}) or {}
+    active_map = maps.get(active_map_id, {})
+
+    lines = [
+        (
+            f"当前地图: {active_map.get('name', active_map_id)} [ID:{active_map_id}] "
+            f"尺寸:{active_map.get('width', '?')}x{active_map.get('height', '?')}尺 "
+            f"网格:{active_map.get('grid_size', '?')}尺"
+        )
+    ]
+    unit_lines: list[str] = []
+    for unit_id, placement in placements.items():
+        if placement.get("map_id") != active_map_id:
+            continue
+        position = placement.get("position", {}) or {}
+        unit_lines.append(
+            f"  {unit_id}: ({position.get('x', '?')}, {position.get('y', '?')}) "
+            f"朝向:{placement.get('facing_deg', 0)}"
+        )
+    if unit_lines:
+        lines.append("当前地图单位坐标:")
+        lines.extend(unit_lines)
+    else:
+        lines.append("当前地图暂无已放置单位。")
+    return "\n".join(lines)
+
+
 def summarize_tool_message(message: ToolMessage) -> str:
     tool_name = getattr(message, "name", "") or "tool"
     raw_text = message_content_to_text(message.content).strip()
 
-    if tool_name in {"consult_rules_handbook", "load_skill"}:
+    if (
+        tool_name in {"consult_rules_handbook", "load_skill"}
+        or (tool_name == "modify_character_state" and raw_text.startswith("# 角色状态调整技能"))
+        or (tool_name == "manage_space" and raw_text.startswith("# 平面空间管理技能"))
+    ):
         # 规则/技能结果若被过度压缩，会让下一轮模型看不到关键依据而回退到记忆作答。
-        compact = " ".join(raw_text.split())
-        if len(compact) > 800:
-            compact = compact[:797] + "..."
-        return f"[工具:{tool_name}] {compact}"
+        return f"[工具:{tool_name}] {compact_text(raw_text, 800)}"
+
+    if tool_name == "inspect_unit":
+        return f"[工具:{tool_name}] {compact_text(raw_text, 4000)}"
 
     if tool_name == "request_dice_roll":
         try:
@@ -381,6 +418,14 @@ def summarize_tool_message(message: ToolMessage) -> str:
     if len(summary) > 180:
         summary = summary[:177] + "..."
     return f"[工具:{tool_name}] {summary}"
+
+
+def compact_text(text: str, limit: int) -> str:
+    """压缩空白并按字符上限截断，保留工具消息的主要事实。"""
+    compact = " ".join(text.split())
+    if len(compact) > limit:
+        return compact[: limit - 3] + "..."
+    return compact
 
 
 def summarize_system_message(content: str) -> str:

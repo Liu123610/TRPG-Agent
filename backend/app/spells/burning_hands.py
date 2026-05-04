@@ -10,6 +10,7 @@ SPELL_DEF: SpellDef = {
     "school": "evocation",
     "casting_time": "action",
     "range": "self (15-foot cone)",
+    "area": {"shape": "cone", "origin": "self", "length": 15, "angle_deg": 53.13},
     "description": "15尺锥形区域，目标DEX豁免，失败受3d6火焰伤害，成功减半。升环+1d6。",
 }
 

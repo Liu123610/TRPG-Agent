@@ -62,20 +62,20 @@ class ChatSessionServiceTests(unittest.IsolatedAsyncioTestCase):
         graph = FakeGraph(
             {
                 "messages": [
-                    AIMessage(content="", tool_calls=[{"name": "weather", "args": {"city": "beijing"}, "id": "call_1"}]),
-                    AIMessage(content="北京今天晴，22C。", tool_calls=[]),
+                    AIMessage(content="", tool_calls=[{"name": "mock_lookup", "args": {"query": "beijing"}, "id": "call_1"}]),
+                    AIMessage(content="查询完成。", tool_calls=[]),
                 ]
             }
         )
         service = ChatSessionService(graph=graph)
 
-        result = await service.process_turn(message="北京天气怎么样", session_id="s1")
+        result = await service.process_turn(message="查一下北京", session_id="s1")
 
-        self.assertEqual("北京今天晴，22C。", result["reply"])
+        self.assertEqual("查询完成。", result["reply"])
         self.assertEqual("s1", result["session_id"])
         self.assertIsNone(result["plan"])
         self.assertEqual("s1", graph.last_config["configurable"]["thread_id"])
-        self.assertEqual("北京天气怎么样", graph.last_input["messages"][0].content)
+        self.assertEqual("查一下北京", graph.last_input["messages"][0].content)
 
     async def test_process_turn_schedules_memory_ingestion_without_changing_reply(self):
         graph = FakeGraph({"messages": [AIMessage(content="好的。", tool_calls=[])]})
@@ -152,7 +152,7 @@ class ChatSessionServiceTests(unittest.IsolatedAsyncioTestCase):
             history["messages"],
         )
         self.assertFalse(any("[工具:" in item["content"] for item in history["messages"]))
-        self.assertFalse(any("实时系统监控窗" in item["content"] for item in history["messages"]))
+        self.assertFalse(any("状态快照" in item["content"] for item in history["messages"]))
 
     async def test_get_history_keeps_ai_text_that_also_triggered_tools(self):
         graph = FakeGraph({"messages": []})

@@ -11,6 +11,84 @@ from langgraph.types import Command
 
 from app.services.tools._helpers import get_combatant, get_condition_action_block_reason
 from app.spells import get_spell_module
+from app.spells._base import get_spell_range_feet
+from app.graph.state import Point2D
+from app.space.geometry import (
+    build_space_state,
+    cone_area,
+    square_area,
+    units_in_geometry,
+    units_in_radius,
+    validate_point_distance,
+    validate_unit_distance,
+)
+
+
+def _resolve_area_target_ids(
+    area_def: dict,
+    state: dict,
+    caster_id: str,
+    target_ids: list[str],
+    area_point: Point2D | None,
+) -> list[str] | None:
+    """按法术范围形状从空间系统自动展开目标；无空间时交还旧手动目标流程。"""
+    space_raw = state.get("space")
+    if not space_raw:
+        return None
+    space = build_space_state(space_raw)
+    if not space.maps:
+        return None
+    caster_placement = space.placements[caster_id]
+    shape = area_def["shape"]
+    origin_kind = area_def.get("origin", "point")
+
+    if origin_kind == "point":
+        if not area_point:
+            return None
+        return [
+            unit_id for unit_id, _ in units_in_radius(
+                space.placements,
+                map_id=caster_placement.map_id,
+                origin=area_point,
+                radius=area_def["radius"],
+            )
+        ]
+
+    if origin_kind == "target":
+        if not target_ids:
+            return None
+        primary = space.placements[target_ids[0]]
+        return [
+            unit_id for unit_id, _ in units_in_radius(
+                space.placements,
+                map_id=primary.map_id,
+                origin=primary.position,
+                radius=area_def["radius"],
+            )
+        ]
+
+    origin = caster_placement.position
+    if shape == "cone":
+        area = cone_area(
+            origin,
+            caster_placement.facing_deg,
+            area_def["length"],
+            area_def.get("angle_deg", 53.13),
+        )
+    elif shape == "square":
+        area = square_area(origin, caster_placement.facing_deg, area_def["size"])
+    else:
+        return None
+
+    return [
+        unit_id for unit_id, _ in units_in_geometry(
+            space.placements,
+            map_id=caster_placement.map_id,
+            area=area,
+            origin=origin,
+        )
+        if unit_id != caster_id
+    ]
 
 
 def _cantrip_dice_count(character_level: int) -> int:
@@ -41,6 +119,7 @@ def cast_spell(
     spell_id: str,
     target_ids: list[str],
     slot_level: int = 0,
+    target_point: dict[str, float] | None = None,
     state: Annotated[dict, InjectedState] = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = None,
 ) -> Command:
@@ -51,6 +130,7 @@ def cast_spell(
         spell_id: 法术标识符（如 "magic_missile", "fire_bolt", "shield"）。
         target_ids: 目标单位 ID 列表。对自身施法传 ["self"]。
         slot_level: 使用的法术位等级。0 表示使用该法术最低环位。戏法无需指定。
+        target_point: 点选范围法术的目标坐标，如 {"x": 30, "y": 20}。
     """
     def _reject(msg: str) -> Command:
         return Command(update={"messages": [ToolMessage(content=msg, tool_call_id=tool_call_id)]})
@@ -75,6 +155,7 @@ def cast_spell(
         return _reject("玩家尚未加载角色卡。")
     player_dict = player_raw.model_dump() if hasattr(player_raw, "model_dump") else dict(player_raw)
     player_id = f"player_{player_dict.get('name', 'player')}"
+    player_dict.setdefault("id", player_id)
 
     # 戏法从 known_cantrips 校验，有环法术从 known_spells 校验
     if is_cantrip:
@@ -95,8 +176,6 @@ def cast_spell(
 
     combat_raw = state.get("combat")
     combat_dict = combat_raw.model_dump() if hasattr(combat_raw, "model_dump") else dict(combat_raw) if combat_raw else None
-    participants = combat_dict.get("participants", {}) if combat_dict else {}
-
     # 动作经济
     casting_time = spell_def.get("casting_time", "action")
     if player_dict.get("id"):
@@ -117,23 +196,82 @@ def cast_spell(
 
     targets: list[dict] = []
     has_scene_target = False
+    resolved_target_ids: list[str] = []
+
+    spell_range = get_spell_range_feet(spell_def)
+    area_def = spell_def.get("area")
+    area_point = Point2D(**target_point) if target_point else None
+    explicit_target_ids = list(target_ids)
+    if area_def and area_def.get("origin", "point") == "point" and area_point:
+        if spell_range is not None:
+            distance_error, space_state = validate_point_distance(
+                state.get("space"),
+                player_dict["id"],
+                area_point,
+                spell_range,
+                action_label=spell_def["name_cn"],
+            )
+            if distance_error:
+                return _reject(distance_error)
+        else:
+            _, space_state = validate_point_distance(
+                state.get("space"),
+                player_dict["id"],
+                area_point,
+                0,
+                action_label=spell_def["name_cn"],
+            )
+        if not space_state or not space_state.maps:
+            return _reject(f"{spell_def['name_cn']} 需要已启用的平面空间来解析目标点范围。")
+
+    if area_def:
+        try:
+            auto_target_ids = _resolve_area_target_ids(area_def, state, player_dict["id"], target_ids, area_point)
+        except KeyError as exc:
+            return _reject(f"范围法术缺少空间落点：{exc.args[0]}。")
+        if auto_target_ids is not None:
+            target_ids = list(dict.fromkeys([*target_ids, *auto_target_ids]))
+
     for tid in target_ids:
-        if tid == "self":
+        if tid in ("self", player_dict["id"]):
             targets.append(player_dict)
+            resolved_target_ids.append(player_dict["id"])
         elif combat_dict:
             found = get_combatant(combat_dict, player_dict, tid)
             if found:
                 targets.append(found)
+                resolved_target_ids.append(tid)
             elif tid in scene_raw:
                 targets.append(scene_raw[tid])
                 has_scene_target = True
+                resolved_target_ids.append(tid)
             else:
                 return _reject(f"找不到目标 '{tid}'。")
         elif tid in scene_raw:
             targets.append(scene_raw[tid])
             has_scene_target = True
+            resolved_target_ids.append(tid)
         else:
             return _reject(f"找不到目标 '{tid}'。")
+
+    if spell_range is not None and not area_point:
+        range_target_ids = list(resolved_target_ids)
+        if area_def and area_def.get("origin") == "self":
+            range_target_ids = []
+        elif area_def and area_def.get("origin") == "target":
+            range_target_ids = explicit_target_ids[:1]
+
+        for resolved_target_id in range_target_ids:
+            if resolved_target_id == player_dict["id"]:
+                continue
+            if distance_error := validate_unit_distance(
+                state.get("space"),
+                player_dict["id"],
+                resolved_target_id,
+                spell_range,
+                action_label=spell_def["name_cn"],
+            ):
+                return _reject(distance_error)
 
     # 消耗法术位
     resources = player_dict.get("resources", {})

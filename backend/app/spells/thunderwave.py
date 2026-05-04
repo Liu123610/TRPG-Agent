@@ -10,6 +10,7 @@ SPELL_DEF: SpellDef = {
     "school": "evocation",
     "casting_time": "action",
     "range": "self (15-foot cube)",
+    "area": {"shape": "square", "origin": "self", "size": 15},
     "description": "15尺立方区域内的每个生物必须进行体质豁免。失败受2d8点雷鸣伤害并被推离10尺，成功减半且不被推离。法术会发出300尺内可听见的巨响。升环每高一环伤害增加1d8。",
 }
 

@@ -11,6 +11,7 @@ SPELL_DEF: SpellDef = {
     "school": "conjuration",
     "casting_time": "action",
     "range": "60 feet",
+    "area": {"shape": "circle", "origin": "target", "radius": 5},
     "description": "对首个目标进行远程法术攻击，命中受1d10穿刺伤害。随后冰刃爆炸，所有目标（首个及周围）需进行DEX豁免，失败受2d6冷冻伤害，成功减半。升环冷冻+1d6。",
 }
 

@@ -25,6 +25,8 @@ export function useChatSender(
   setPendingAction: (action: any) => void,
   setPlayerState: (state: any) => void,
   setCombatState: (state: any) => void,
+  setSpaceState: (state: any) => void,
+  setSceneUnitsState: (state: Record<string, any> | null) => void,
   setError: (error: string) => void,
   setSending: (sending: boolean) => void,
   clearError: () => void,
@@ -76,9 +78,11 @@ export function useChatSender(
             await onDiceRollAnimation(rawRoll)
           }
         },
-        onStateUpdate: (player, combat) => {
+        onStateUpdate: (player, combat, _sceneUnits, _deadUnits, space) => {
           if (player !== undefined) setPlayerState(player)
           if (combat !== undefined) setCombatState(combat)
+          if (_sceneUnits !== undefined) setSceneUnitsState(_sceneUnits)
+          if (space !== undefined) setSpaceState(space)
         },
         onPendingAction: (action) => {
           stopLoadingOnce()
