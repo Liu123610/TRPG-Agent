@@ -11,9 +11,11 @@ from app.rag.auto_rule_evidence import AutoRuleEvidenceEvaluation
 class _FakeLLMService:
     def __init__(self) -> None:
         self.messages = []
+        self.tools = []
 
     def invoke_with_tools(self, *, messages, tools, system_prompt, mode):
         self.messages = messages
+        self.tools = tools
         return AIMessage(content="继续。")
 
 
@@ -107,7 +109,12 @@ def test_optional_rule_rag_skips_tool_followup_invocation(monkeypatch):
     assert "[机会型上下文]" not in runtime_message.content
 
 
-def test_agent_controlled_combat_turn_keeps_restricted_tool_profile(monkeypatch):
+def test_combat_assistant_uses_official_tool_profile_without_node_filter(monkeypatch):
+    fake_llm = _FakeLLMService()
+    monkeypatch.setattr(nodes.settings, "agent_trace_enabled", False)
+    monkeypatch.setattr(nodes.settings, "auto_rule_rag_enabled", False)
+    monkeypatch.setattr(nodes, "_get_llm_service", lambda: fake_llm)
+    monkeypatch.setattr(nodes, "get_assistant_system_prompt", lambda mode: "战斗规则")
     monkeypatch.setattr(
         nodes,
         "get_tool_profile",
@@ -116,22 +123,28 @@ def test_agent_controlled_combat_turn_keeps_restricted_tool_profile(monkeypatch)
             SimpleNamespace(name="consult_rules_handbook"),
             SimpleNamespace(name="attack"),
             SimpleNamespace(name="cast_spell"),
-        ],
+            ],
     )
-    state = {
-        "player": {"id": "player_hero"},
-        "combat": {
-            "current_actor_id": "goblin_1",
-            "participants": {
-                "goblin_1": {
-                    "id": "goblin_1",
-                    "side": "enemy",
-                    "hp": 7,
-                }
+
+    nodes.combat_assistant_node(
+        {
+            "player": {"id": "player_hero"},
+            "combat": {
+                "current_actor_id": "goblin_1",
+                "participants": {
+                    "goblin_1": {
+                        "id": "goblin_1",
+                        "side": "enemy",
+                        "hp": 7,
+                    }
+                },
             },
-        },
-    }
+        }
+    )
 
-    tools = nodes._get_assistant_tools_for_state(state, COMBAT_AGENT_MODE)
-
-    assert [tool.name for tool in tools] == ["delegate_combat_turn", "consult_rules_handbook"]
+    assert [tool.name for tool in fake_llm.tools] == [
+        "delegate_combat_turn",
+        "consult_rules_handbook",
+        "attack",
+        "cast_spell",
+    ]

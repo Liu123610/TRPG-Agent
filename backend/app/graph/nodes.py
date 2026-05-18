@@ -696,7 +696,7 @@ def _invoke_assistant(state: GraphState, mode: str) -> dict:
         assembled_context = assembler.append_optional_runtime_context(required_context, [])
     runtime_state_message = build_runtime_state_message(assembled_context.runtime_state_text)
     invocation_messages = [*assembled_context.model_input_messages, runtime_state_message]
-    tools = _get_assistant_tools_for_state(state, mode)
+    tools = get_tool_profile(mode)
 
     logger.info(
         "Assistant invocation mode={} session={} messages={} tools={}",
@@ -760,48 +760,6 @@ def _invoke_assistant(state: GraphState, mode: str) -> dict:
         "messages": [runtime_state_message, response],
         "output": output,
     }
-
-
-_AGENT_CONTROLLED_TURN_TOOL_NAMES = {
-    "delegate_combat_turn",
-    "prepare_combat_end",
-    "next_turn",
-    "inspect_unit",
-    "consult_rules_handbook",
-}
-
-
-def _get_assistant_tools_for_state(state: GraphState, mode: str) -> list:
-    """敌方与 AI 托管友方回合只让主 Agent 做裁决和委托，实际落子交给执行器。"""
-    tools = get_tool_profile(mode)
-    if mode != COMBAT_AGENT_MODE or not _is_agent_controlled_combat_turn(state):
-        return tools
-    return [tool for tool in tools if tool.name in _AGENT_CONTROLLED_TURN_TOOL_NAMES]
-
-
-def _is_agent_controlled_combat_turn(state: GraphState) -> bool:
-    """识别必须走执行器的当前行动者，玩家与玩家接管友方仍保留完整动作入口。"""
-    combat = _state_value_to_dict(state.get("combat"))
-    if not combat:
-        return False
-
-    current_id = str(combat.get("current_actor_id") or "")
-    player = _state_value_to_dict(state.get("player"))
-    if player and current_id == str(player.get("id") or ""):
-        return False
-
-    actor = _state_value_to_dict((combat.get("participants") or {}).get(current_id))
-    if not actor:
-        return False
-    if actor.get("side") == "enemy":
-        return True
-    if actor.get("side") != "ally":
-        return False
-    if int(actor.get("hp", 0) or 0) <= 0:
-        return False
-
-    control_mode = str(actor.get("control_mode") or actor.get("controlled_by") or "").lower()
-    return bool(actor.get("autopilot") or actor.get("llm_controlled") or control_mode in {"ai", "llm", "agent"})
 
 
 def _start_optional_rule_rag(state: GraphState, mode: str, session_id: str) -> OptionalRuleRagTask | None:

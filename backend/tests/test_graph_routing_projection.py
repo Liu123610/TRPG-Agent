@@ -171,6 +171,21 @@ def test_delegate_combat_turn_writes_pending_executor_request():
     assert result.update["messages"][0].additional_kwargs["hidden_from_ui"] is True
 
 
+def test_delegate_combat_turn_accepts_player_instruction_handoff():
+    result = _invoke_tool(
+        delegate_combat_turn,
+        tool_input={
+            "actor_id": "player_hero",
+            "instruction": "玩家说：我攻击最近的地精。裁定：player_hero 用长剑攻击 goblin_1。",
+        },
+    )
+
+    assert result.update["pending_combat_executor"] == {
+        "actor_id": "player_hero",
+        "instruction": "玩家说：我攻击最近的地精。裁定：player_hero 用长剑攻击 goblin_1。",
+    }
+
+
 def test_prepare_combat_end_writes_pending_workflow_request():
     result = _invoke_tool(
         prepare_combat_end,
@@ -807,7 +822,7 @@ def test_tool_profiles_split_exploration_and_combat_visibility():
     assert "take_rest" not in combat_tools
     assert "use_class_feature" not in narrative_tools
     assert "use_class_feature" not in combat_tools
-    assert "attack_action" in combat_tools
+    assert "attack_action" not in combat_tools
     assert "attack_action" not in narrative_tools
     assert "manage_space" in narrative_tools
     assert "manage_space" in combat_tools
@@ -846,15 +861,10 @@ def test_tool_profiles_expose_only_current_recommended_entries_in_stable_order()
     assert [tool.name for tool in get_tool_profile("combat")] == [
         "request_dice_roll",
         "modify_character_state",
-        "use_class_action",
-        "use_item",
-        "attack_action",
         "delegate_combat_turn",
         "prepare_combat_end",
         "manage_scene_units",
-        "use_monster_action",
         "next_turn",
-        "cast_spell",
         "inspect_unit",
         "consult_rules_handbook",
         "manage_space",
@@ -883,6 +893,8 @@ def test_compatibility_tools_are_toolnode_only_without_profile_duplicates():
     assert "choose_fighter_archetype" not in all_tool_names
     assert "switch_plane_map" not in all_tool_names
     assert "manage_adventure" in all_tool_names
+    assert "attack_action" in all_tool_names
+    assert "use_monster_action" in all_tool_names
     assert "start_combat" in all_tool_names
     assert "end_combat" in all_tool_names
     assert "prepare_combat_start" in all_tool_names
@@ -1155,13 +1167,7 @@ def test_combat_assistant_node_invokes_llm_with_monster_turn_directive_and_comba
     assert result["messages"][1].tool_calls[0]["name"] == "delegate_combat_turn"
     llm_call = fake_service.calls[0]
     assert llm_call["mode"] == COMBAT_AGENT_MODE
-    assert {tool.name for tool in llm_call["tools"]} == {
-        "delegate_combat_turn",
-        "prepare_combat_end",
-        "next_turn",
-        "inspect_unit",
-        "consult_rules_handbook",
-    }
+    assert [tool.name for tool in llm_call["tools"]] == [tool.name for tool in get_tool_profile("combat")]
     runtime_state = llm_call["messages"][-1].content
     assert "当前是怪物/NPC Goblin [ID:goblin_1] 的回合" in runtime_state
     assert "不要等待用户继续发话" in runtime_state
@@ -1169,10 +1175,10 @@ def test_combat_assistant_node_invokes_llm_with_monster_turn_directive_and_comba
     assert "哥布林正试图拖走祭司" in runtime_state
     assert "start_combat" not in {tool.name for tool in llm_call["tools"]}
     assert "attack_action" not in {tool.name for tool in llm_call["tools"]}
-    assert "manage_space" not in {tool.name for tool in llm_call["tools"]}
+    assert "manage_space" in {tool.name for tool in llm_call["tools"]}
 
 
-def test_combat_assistant_keeps_action_tools_for_player_turn():
+def test_combat_assistant_uses_same_tools_for_player_turn():
     class _FakeLLMService:
         def __init__(self):
             self.calls = []
@@ -1197,14 +1203,14 @@ def test_combat_assistant_keeps_action_tools_for_player_turn():
     with patch("app.graph.nodes._get_llm_service", return_value=fake_service):
         combat_assistant_node(state)
 
+    assert [tool.name for tool in fake_service.calls[0]["tools"]] == [tool.name for tool in get_tool_profile("combat")]
     tool_names = {tool.name for tool in fake_service.calls[0]["tools"]}
-    assert "attack_action" in tool_names
-    assert "cast_spell" in tool_names
-    assert "use_item" in tool_names
-    assert "manage_space" in tool_names
+    assert "delegate_combat_turn" in tool_names
+    assert "attack_action" not in tool_names
+    assert "use_monster_action" not in tool_names
 
 
-def test_combat_assistant_narrows_tools_for_ai_controlled_ally_turn():
+def test_combat_assistant_uses_same_tools_for_ai_controlled_ally_turn():
     class _FakeLLMService:
         def __init__(self):
             self.calls = []
@@ -1245,13 +1251,9 @@ def test_combat_assistant_narrows_tools_for_ai_controlled_ally_turn():
 
     tool_names = {tool.name for tool in fake_service.calls[0]["tools"]}
     runtime_state = fake_service.calls[0]["messages"][-1].content
-    assert tool_names == {
-        "delegate_combat_turn",
-        "prepare_combat_end",
-        "next_turn",
-        "inspect_unit",
-        "consult_rules_handbook",
-    }
+    assert [tool.name for tool in fake_service.calls[0]["tools"]] == [tool.name for tool in get_tool_profile("combat")]
+    assert "attack_action" not in tool_names
+    assert "use_monster_action" not in tool_names
     assert "AI 托管友方单位 伊莲" in runtime_state
     assert "委托战斗执行器" in runtime_state
 
