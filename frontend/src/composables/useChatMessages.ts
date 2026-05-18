@@ -15,7 +15,9 @@ const createMessage = (
   ...extras,
 })
 
-const createWelcomeMessage = () => createMessage('assistant', '你好，我是 TRPG 助手。你可以直接开始提问。')
+export const WELCOME_MESSAGE = '你好，我是奥秘之桌。你可以直接开始提问。'
+
+const createWelcomeMessage = () => createMessage('assistant', WELCOME_MESSAGE)
 
 const normalizeCombatState = (state: any) => {
   if (!state || typeof state !== 'object') return null

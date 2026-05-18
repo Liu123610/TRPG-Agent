@@ -14,6 +14,11 @@ class ChatRequest(BaseModel):
     reaction_response: Optional[dict] = Field(default=None, description="Structured reaction choice payload for pending combat reactions")
 
 
+class EndCombatTurnRequest(BaseModel):
+    session_id: str = Field(description="Conversation session id")
+    actor_id: str = Field(description="Current player-controlled combat actor id")
+
+
 class ChatResponse(BaseModel):
     reply: str
     plan: Optional[str] = None

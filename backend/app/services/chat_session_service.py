@@ -23,6 +23,7 @@ from app.adventures.runtime import (
 )
 from app.config.settings import settings
 from app.graph.builder import build_graph
+from app.graph.constants import ROUTER_NODE
 from app.memory.checkpointer import close_checkpointer, get_checkpointer
 from app.memory.context_assembler import (
     ADVENTURE_NODE_FRAME_MESSAGE_PREFIX,
@@ -167,6 +168,340 @@ class ChatSessionService:
             "adventure": state_payload.get("adventure"),
         }
 
+    async def end_player_controlled_turn(self, *, session_id: str, actor_id: str) -> dict[str, Any]:
+        """前端结束回合按钮的结构化入口；不经过主 Agent 自然语言裁定。"""
+        from app.services.tools.combat_tools import next_turn
+
+        config = self._graph_config(session_id)
+        state = await self._graph.aget_state(config)
+        baseline_msg_id = self._last_message_id(state)
+        values = dict(state.values) if state and hasattr(state, "values") else {}
+        combat = self._state_value_to_dict(values.get("combat"))
+        player = self._state_value_to_dict(values.get("player"))
+        if not combat:
+            raise ValueError("当前不在战斗中，不能结束回合。")
+        if combat.get("current_actor_id") != actor_id:
+            raise ValueError(f"当前行动者是 {combat.get('current_actor_id')}，不能结束 {actor_id} 的回合。")
+        if not self._is_player_controlled_actor(actor_id, combat, player):
+            raise ValueError("只有玩家单位或友方单位可以通过前端按钮结束回合。")
+
+        result = next_turn.invoke({
+            "name": next_turn.name,
+            "args": {"state": values},
+            "id": "frontend-end-turn",
+            "type": "tool_call",
+        })
+        update = dict(result.update or {}) if isinstance(result, Command) else {}
+        if not update:
+            raise ValueError("结束回合失败：工具没有返回状态更新。")
+
+        direct_message = self._first_message_content(update.get("messages", []))
+        state_update = self._direct_end_turn_state_update(update, actor_id, direct_message)
+        events = self._events_from_tool_update(update)
+        self._apply_local_state_update(values, state_update)
+        if hasattr(self._graph, "aupdate_state"):
+            await self._graph.aupdate_state(config, state_update, as_node=ROUTER_NODE)
+
+        values = await self._wake_combat_agent_after_direct_turn(
+            config=config,
+            values=values,
+            events=events,
+            ended_actor_id=actor_id,
+        )
+        state = await self._graph.aget_state(config)
+        state_payload = self._project_state_update_payload(state.values, include_absent=True) if hasattr(state, "values") else {}
+        message = self._extract_reply_from_messages(self._extract_new_messages(state, baseline_msg_id)) or direct_message
+        pending_action = self._get_pending_action(state)
+        await touch_chat_session(session_id=session_id, message="[前端:结束回合]", reply=message)
+        return {
+            "session_id": session_id,
+            "message": message,
+            "events": events,
+            "pending_action": pending_action,
+            "player": state_payload.get("player"),
+            "combat": state_payload.get("combat"),
+            "space": state_payload.get("space"),
+            "scene_units": state_payload.get("scene_units"),
+            "dead_units": state_payload.get("dead_units"),
+            "departed_units": state_payload.get("departed_units"),
+            "adventure": state_payload.get("adventure"),
+        }
+
+    async def end_player_controlled_turn_stream(self, *, session_id: str, actor_id: str) -> AsyncGenerator[str, None]:
+        """结束回合按钮的 SSE 入口；按钮动作确定，后续非玩家回合逐节点推送。"""
+        from app.services.tools.combat_tools import next_turn
+
+        config = self._graph_config(session_id)
+        state = await self._graph.aget_state(config)
+        baseline_msg_id = self._last_message_id(state)
+        values = dict(state.values) if state and hasattr(state, "values") else {}
+        combat = self._state_value_to_dict(values.get("combat"))
+        player = self._state_value_to_dict(values.get("player"))
+        if not combat:
+            yield self._sse_event("error", {"message": "当前不在战斗中，不能结束回合。"})
+            return
+        if combat.get("current_actor_id") != actor_id:
+            yield self._sse_event("error", {"message": f"当前行动者是 {combat.get('current_actor_id')}，不能结束 {actor_id} 的回合。"})
+            return
+        if not self._is_player_controlled_actor(actor_id, combat, player):
+            yield self._sse_event("error", {"message": "只有玩家单位或友方单位可以通过前端按钮结束回合。"})
+            return
+
+        result = next_turn.invoke({
+            "name": next_turn.name,
+            "args": {"state": values},
+            "id": "frontend-end-turn",
+            "type": "tool_call",
+        })
+        update = dict(result.update or {}) if isinstance(result, Command) else {}
+        if not update:
+            yield self._sse_event("error", {"message": "结束回合失败：工具没有返回状态更新。"})
+            return
+
+        direct_message = self._first_message_content(update.get("messages", []))
+        state_update = self._direct_end_turn_state_update(update, actor_id, direct_message)
+        self._apply_local_state_update(values, state_update)
+        if hasattr(self._graph, "aupdate_state"):
+            await self._graph.aupdate_state(config, state_update, as_node=ROUTER_NODE)
+
+        state_delta = self._project_state_update_payload(state_update)
+        if state_delta:
+            yield self._sse_event("state_update", state_delta)
+        for event in self._events_from_tool_update(update):
+            yield self._json_event_to_sse(event)
+
+        combat = self._state_value_to_dict(values.get("combat"))
+        player = self._state_value_to_dict(values.get("player"))
+        actor = self._current_combat_actor(combat, player)
+        if self._needs_agent_controlled_turn(actor):
+            handoff = self._build_direct_turn_handoff_message(actor_id, actor, combat)
+            async for chunk in self._graph.astream({"messages": [handoff]}, config=config, stream_mode="updates"):
+                for node_output in chunk.values():
+                    if not isinstance(node_output, dict):
+                        continue
+                    if "pending_reaction" in node_output:
+                        yield self._sse_event("pending_action", self._pending_action_from_reaction(node_output.get("pending_reaction")))
+                    state_delta = self._project_state_update_payload(node_output)
+                    if state_delta:
+                        yield self._sse_event("state_update", state_delta)
+                    for event in self._events_from_graph_node_output(node_output):
+                        yield self._json_event_to_sse(event)
+
+        state = await self._graph.aget_state(config)
+        state_payload = self._project_state_update_payload(state.values, include_absent=True) if hasattr(state, "values") else {}
+        yield self._sse_event("state_update", state_payload)
+        pending_action = self._get_pending_action(state)
+        new_messages = self._extract_new_messages(state, baseline_msg_id)
+        message = self._extract_reply_from_messages(new_messages) or direct_message
+        await touch_chat_session(session_id=session_id, message="[前端:结束回合]", reply=message)
+        yield self._sse_event("pending_action", pending_action)
+        yield self._sse_event("done", {"session_id": session_id})
+
+    def _is_player_controlled_actor(self, actor_id: str, combat: dict, player: dict | None) -> bool:
+        """玩家本人和友方单位允许前端直接结束回合；敌方仍由 Agent/执行器接管。"""
+        if player and actor_id == player.get("id"):
+            return True
+        actor = (combat.get("participants") or {}).get(actor_id) or {}
+        return actor.get("side") == "ally"
+
+    def _direct_end_turn_state_update(self, update: dict[str, Any], actor_id: str, result_text: str) -> dict[str, Any]:
+        """直连按钮没有 AI tool_call 前置，写成内部流程帧比悬空 ToolMessage 更稳定。"""
+        state_update = dict(update)
+        state_update["messages"] = [HumanMessage(content=(
+            "[系统:前端结束回合]\n"
+            f"{actor_id} 已通过前端按钮结束回合；后端已执行 next_turn。\n"
+            f"next_turn: {result_text or '未返回文本。'}"
+        ))]
+        return state_update
+
+    async def _wake_combat_agent_after_direct_turn(
+        self,
+        *,
+        config: dict[str, Any],
+        values: dict[str, Any],
+        events: list[dict[str, Any]],
+        ended_actor_id: str,
+    ) -> dict[str, Any]:
+        """按钮只做确定的结束回合；后续怪物/NPC 决策必须交还主 Agent。"""
+        combat = self._state_value_to_dict(values.get("combat"))
+        player = self._state_value_to_dict(values.get("player"))
+        actor = self._current_combat_actor(combat, player)
+        if not self._needs_agent_controlled_turn(actor):
+            return values
+
+        handoff = self._build_direct_turn_handoff_message(ended_actor_id, actor, combat)
+        async for chunk in self._graph.astream({"messages": [handoff]}, config=config, stream_mode="updates"):
+            for node_output in chunk.values():
+                if not isinstance(node_output, dict):
+                    continue
+                events.extend(self._events_from_graph_node_output(node_output))
+
+        state = await self._graph.aget_state(config)
+        return dict(state.values) if state and hasattr(state, "values") else values
+
+    def _build_direct_turn_handoff_message(self, ended_actor_id: str, actor: dict, combat: dict) -> HumanMessage:
+        """把前端按钮造成的流程事实写入上下文，并要求主 Agent 接回非玩家回合。"""
+        actor_id = str(actor.get("id") or combat.get("current_actor_id") or "")
+        actor_name = str(actor.get("name") or actor_id)
+        return HumanMessage(content=(
+            "[系统:战斗流程接管]\n"
+            f"当前行动者是 {actor_name} [ID:{actor_id}]。\n"
+            "请主 Agent 先决定战术意图，再按需委托战斗执行器；后台没有替你执行该单位动作。\n"
+            f"上一行动者 {ended_actor_id} 已通过前端按钮结束回合。"
+        ))
+
+    def _json_event_to_sse(self, event: dict[str, Any]) -> str:
+        """把非 SSE 事件数组中的项目转换为同名 SSE 事件。"""
+        event_type = str(event.get("type") or "")
+        if event_type == "dice_roll":
+            return self._sse_event("dice_roll", event.get("payload") or {})
+        if event_type == "combat_action":
+            return self._sse_event("combat_action", {
+                "content": event.get("content", ""),
+                "hp_changes": event.get("hp_changes", []) or [],
+            })
+        if event_type == "tool_message":
+            return self._sse_event("tool_message", {"content": event.get("content", "")})
+        return self._sse_event("assistant_message", {"content": event.get("content", "")})
+
+    def _current_combat_actor(self, combat: dict, player: dict | None) -> dict:
+        """获取当前行动者；玩家在 player 字段，其他单位在 participants。"""
+        actor_id = str(combat.get("current_actor_id") or "")
+        if player and actor_id == player.get("id"):
+            return dict(player)
+        actor = (combat.get("participants") or {}).get(actor_id) or {}
+        return dict(actor)
+
+    def _needs_agent_controlled_turn(self, actor: dict) -> bool:
+        """敌方和 AI 托管友方需要唤醒主 Agent 决策，不能由服务层直接执行。"""
+        if not actor or actor.get("hp", 0) <= 0:
+            return False
+        if actor.get("side") == "enemy":
+            return True
+        if actor.get("side") != "ally":
+            return False
+        control_mode = str(actor.get("control_mode") or actor.get("controlled_by") or "").lower()
+        return bool(actor.get("autopilot") or actor.get("llm_controlled") or control_mode in {"ai", "llm", "agent"})
+
+    def _apply_local_state_update(self, values: dict[str, Any], update: dict[str, Any]) -> None:
+        """本地同步 Command.update，方便连续自动流程读取最新状态。"""
+        for key, value in update.items():
+            if key == "messages":
+                values[key] = [*list(values.get(key, [])), *list(value or [])]
+            else:
+                values[key] = value
+
+    def _events_from_tool_update(self, update: dict[str, Any]) -> list[dict[str, Any]]:
+        """把直连工具结果转成前端可复用的事件数组。"""
+        events: list[dict[str, Any]] = []
+        hp_changes = list(update.get("hp_changes", []) or [])
+        for message in update.get("messages", []) or []:
+            if self._is_hidden_tool_message(message):
+                continue
+            content = str(getattr(message, "content", ""))
+            attack_roll = self._extract_attack_roll_payload(message)
+            if attack_roll:
+                events.append({
+                    "type": "dice_roll",
+                    "payload": self._build_dice_roll_event_payload(attack_roll, kind="attack"),
+                })
+            if hp_changes:
+                events.append({"type": "combat_action", "content": content, "hp_changes": hp_changes})
+                hp_changes = []
+            elif content:
+                events.append({"type": "tool_message", "content": content})
+        if hp_changes:
+            events.append({"type": "combat_action", "content": "", "hp_changes": hp_changes})
+        return events
+
+    def _events_from_combat_events(self, combat_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """把执行器 combat_events 转成 JSON 事件，供非 SSE 接口复用。"""
+        events: list[dict[str, Any]] = []
+        for combat_event in combat_events or []:
+            attack_roll = combat_event.get("attack_roll")
+            if isinstance(attack_roll, dict):
+                events.append({
+                    "type": "dice_roll",
+                    "payload": self._build_dice_roll_event_payload(attack_roll, kind="attack"),
+                })
+            events.append({
+                "type": "combat_action",
+                "content": combat_event.get("content", ""),
+                "hp_changes": combat_event.get("hp_changes", []) or [],
+            })
+        return events
+
+    def _events_from_graph_node_output(self, node_output: dict[str, Any]) -> list[dict[str, Any]]:
+        """复用流式分支的展示规则，让按钮直连后的 Agent 结果仍能驱动前端。"""
+        events = self._events_from_combat_events(node_output.get("combat_events", []) or [])
+        hp_changes = list(node_output.get("hp_changes", []) or [])
+
+        for msg in node_output.get("messages", []) or []:
+            if isinstance(msg, AIMessage) and msg.content:
+                if self._is_internal_tool_prelude(msg, node_output):
+                    continue
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                if content.strip():
+                    events.append({"type": "assistant_message", "content": content})
+                continue
+
+            if isinstance(msg, ToolMessage):
+                if self._is_hidden_tool_message(msg):
+                    continue
+                attack_roll = self._extract_attack_roll_payload(msg)
+                if attack_roll:
+                    events.append({
+                        "type": "dice_roll",
+                        "payload": self._build_dice_roll_event_payload(attack_roll, kind="attack"),
+                    })
+                if hp_changes:
+                    events.append({"type": "combat_action", "content": msg.content, "hp_changes": hp_changes})
+                    hp_changes = []
+                elif msg.content:
+                    events.append({"type": "tool_message", "content": msg.content})
+                continue
+
+            if isinstance(msg, HumanMessage) and isinstance(msg.content, str) and msg.content.startswith("[系统:"):
+                if (
+                    is_runtime_state_message(msg)
+                    or is_adventure_node_frame_message(msg)
+                    or msg.content.startswith("[系统:战斗执行器]")
+                    or msg.content.startswith("[系统:前端结束回合]")
+                    or msg.content.startswith("[系统:战斗流程接管]")
+                ):
+                    continue
+                events.append({"type": "combat_action", "content": msg.content, "hp_changes": hp_changes})
+                hp_changes = []
+
+        if hp_changes:
+            events.append({"type": "combat_action", "content": "", "hp_changes": hp_changes})
+        return events
+
+    def _is_internal_tool_prelude(self, msg: AIMessage, node_output: dict[str, Any] | None = None) -> bool:
+        """隐藏只用于推动工具链的简短预备语，保留真正战果和叙事回复。"""
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if not tool_calls:
+            return False
+        node_output = node_output or {}
+        if node_output.get("hp_changes") or node_output.get("combat_events"):
+            return False
+        hidden_workflow_tools = {
+            "manage_space",
+            "manage_scene_units",
+            "spawn_monsters",
+            "spawn_ally",
+            "prepare_combat_start",
+            "delegate_combat_turn",
+            "prepare_combat_end",
+        }
+        return all(call.get("name") in hidden_workflow_tools for call in tool_calls if isinstance(call, dict))
+
+    def _first_message_content(self, messages: list[Any]) -> str:
+        """把结构化动作产生的首条工具消息转成前端战报文本。"""
+        if not messages:
+            return ""
+        return str(getattr(messages[0], "content", messages[0]))
+
     def _get_pending_action(self, state: Any) -> Optional[dict]:
         """抓取由于交互工具而被主流程暂挂（Interrupt）的行为等待标记"""
         if state and hasattr(state, "values"):
@@ -220,6 +555,11 @@ class ChatSessionService:
 
         return list(all_messages[start_idx:])
 
+    def _last_message_id(self, state: Any) -> str | None:
+        """记录按钮操作前的消息界标，便于结束后抽取本轮 Agent 回复。"""
+        messages = state.values.get("messages", []) if state and hasattr(state, "values") else []
+        return getattr(messages[-1], "id", None) if messages else None
+
     def _extract_reply_from_messages(self, new_messages: list[Any]) -> str:
         """只拼接本轮真正对用户可见的 AI 文本回复。"""
         reply_parts: list[str] = []
@@ -227,6 +567,8 @@ class ChatSessionService:
             if isinstance(msg, HumanMessage) and is_internal_system_human_message(msg):
                 continue
             if isinstance(msg, AIMessage) and msg.content:
+                if self._is_internal_tool_prelude(msg):
+                    continue
                 if isinstance(msg.content, str):
                     reply_parts.append(msg.content)
                 elif isinstance(msg.content, list):
@@ -345,6 +687,7 @@ class ChatSessionService:
         await self._graph.aupdate_state(
             config,
             state_update,
+            as_node=ROUTER_NODE,
         )
 
     def _current_or_default_adventure(self, state: Any) -> dict[str, Any]:
@@ -388,7 +731,7 @@ class ChatSessionService:
             state_update["adventure"] = update.adventure
             state_update.update(self._adventure_node_frame_update(state, update.adventure))
         if state_update:
-            await self._graph.aupdate_state(config, state_update)
+            await self._graph.aupdate_state(config, state_update, as_node=ROUTER_NODE)
         return update
 
     async def _apply_pre_turn_adventure_runtime(
@@ -426,7 +769,7 @@ class ChatSessionService:
             state_update["adventure"] = update.adventure
             state_update.update(self._adventure_node_frame_update(state, update.adventure))
         if state_update:
-            await self._graph.aupdate_state(config, state_update)
+            await self._graph.aupdate_state(config, state_update, as_node=ROUTER_NODE)
         return update
 
     def _adventure_node_frame_update(self, state: Any, adventure: dict[str, Any]) -> dict[str, Any]:
@@ -519,6 +862,18 @@ class ChatSessionService:
         """格式化单条 SSE 事件"""
         return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
+    def _stream_combat_event(self, combat_event: dict[str, Any]) -> list[str]:
+        """把执行器聚合出的战斗事件还原成前端既有骰子/血条事件。"""
+        events: list[str] = []
+        attack_roll = combat_event.get("attack_roll")
+        if isinstance(attack_roll, dict):
+            events.append(self._sse_event("dice_roll", self._build_dice_roll_event_payload(attack_roll, kind="attack")))
+        events.append(self._sse_event("combat_action", {
+            "content": combat_event.get("content", ""),
+            "hp_changes": combat_event.get("hp_changes", []) or [],
+        }))
+        return events
+
     async def process_turn_stream(
         self,
         message: Optional[str] = None,
@@ -587,12 +942,18 @@ class ChatSessionService:
                 if state_delta:
                     yield self._sse_event("state_update", state_delta)
 
+                for combat_event in node_output.get("combat_events", []) or []:
+                    for event in self._stream_combat_event(combat_event):
+                        yield event
+
                 # 提取消息增量
                 new_messages = node_output.get("messages", [])
                 hp_changes = node_output.get("hp_changes", [])
 
                 for msg in new_messages:
                     if isinstance(msg, AIMessage) and msg.content:
+                        if self._is_internal_tool_prelude(msg, node_output):
+                            continue
                         # 战斗流里很多给玩家看的旁白和工具调用会落在同一条 AIMessage 上，不能因为带 tool_calls 就吞掉文本。
                         content = msg.content if isinstance(msg.content, str) else str(msg.content)
                         # 只过滤模型工具调用时吐出的纯空白占位，避免前端生成空气泡。
@@ -629,7 +990,11 @@ class ChatSessionService:
                             yield self._sse_event("tool_message", payload)
 
                     elif isinstance(msg, HumanMessage) and isinstance(msg.content, str) and msg.content.startswith("[系统:"):
-                        if is_runtime_state_message(msg) or is_adventure_node_frame_message(msg):
+                        if (
+                            is_runtime_state_message(msg)
+                            or is_adventure_node_frame_message(msg)
+                            or msg.content.startswith("[系统:战斗执行器]")
+                        ):
                             continue
                         attack_roll = self._extract_attack_roll_payload(msg)
                         if attack_roll:
@@ -698,6 +1063,8 @@ class ChatSessionService:
             if len(history) >= limit:
                 break
             if isinstance(msg, AIMessage) and msg.content:
+                if self._is_internal_tool_prelude(msg):
+                    continue
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 history.append({"role": "assistant", "content": content})
             elif isinstance(msg, HumanMessage) and not str(msg.content).startswith("[系统"):

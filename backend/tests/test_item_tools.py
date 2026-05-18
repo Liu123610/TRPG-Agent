@@ -71,6 +71,69 @@ def test_drinking_healing_potion_uses_bonus_action_in_combat():
     assert updated["action_available"] is True
     assert updated["bonus_action_available"] is False
     assert updated["inventory"][0]["quantity"] == 1
+    assert "温良 饮下 治疗药水" in result.update["messages"][0].content
+
+
+def test_ally_drink_without_target_uses_actor_as_target():
+    """队友自己喝药时即使省略 target_id，也不应默认治疗玩家。"""
+    player = copy.deepcopy(PREDEFINED_CHARACTERS["战士"])
+    player.update({"name": "温良", "id": "温良", "hp": 4})
+    prepare_player_for_combat(player)
+    ally = get_ally_profile("fighter_companion")
+    ally["hp"] = 5
+    combat = {
+        "round": 1,
+        "participants": {"fighter_companion": ally},
+        "initiative_order": ["fighter_companion", "温良"],
+        "current_actor_id": "fighter_companion",
+    }
+    state = {
+        "player": player,
+        "combat": combat,
+        "space": _space_state({"fighter_companion": (0, 0), "温良": (30, 0)}),
+    }
+
+    with patch("app.services.tools.item_tools.d20.roll", return_value=d20.roll("5")):
+        result = _invoke_tool(
+            use_item,
+            tool_input={"item_id": "potion_of_healing", "actor_id": "fighter_companion", "mode": "drink", "state": state},
+        )
+
+    updated_ally = result.update["combat"]["participants"]["fighter_companion"]
+    assert updated_ally["hp"] == 10
+    assert "player" not in result.update
+    assert player["hp"] == 4
+    assert updated_ally["bonus_action_available"] is False
+    assert "格林 饮下 治疗药水" in result.update["messages"][0].content
+
+
+def test_drink_rejects_targeting_other_unit_at_any_distance():
+    """drink 不能被误用成远程给别人喝药；给别人必须 feed 或 throw。"""
+    player = copy.deepcopy(PREDEFINED_CHARACTERS["战士"])
+    player.update({"name": "温良", "id": "温良", "hp": 4})
+    prepare_player_for_combat(player)
+    ally = get_ally_profile("fighter_companion")
+    combat = {
+        "round": 1,
+        "participants": {"fighter_companion": ally},
+        "initiative_order": ["fighter_companion", "温良"],
+        "current_actor_id": "fighter_companion",
+    }
+
+    result = _invoke_tool(
+        use_item,
+        tool_input={
+            "item_id": "potion_of_healing",
+            "actor_id": "fighter_companion",
+            "target_id": "player",
+            "mode": "drink",
+            "state": {"player": player, "combat": combat, "space": _space_state({"fighter_companion": (0, 0), "温良": (30, 0)})},
+        },
+    )
+
+    assert "drink 只能由使用者自己饮用" in result.update["messages"][0].content
+    assert "player" not in result.update
+    assert "combat" not in result.update
 
 
 def test_use_item_player_alias_resolves_to_real_player_id_for_range():
@@ -101,6 +164,7 @@ def test_use_item_player_alias_resolves_to_real_player_id_for_range():
     assert result["player"]["id"] == "温良"
     assert result["player"]["action_available"] is False
     assert result["combat"]["participants"]["fighter_companion"]["hp"] == 10
+    assert "温良 贴身给 格林 喂下 治疗药水" in result["messages"][0].content
 
 
 def test_greater_healing_potion_restores_4d4_plus_4_hp():
@@ -160,6 +224,7 @@ def test_throwing_healing_potion_uses_action_and_has_range_limit():
     assert result.update["player"]["action_available"] is False
     assert result.update["player"]["bonus_action_available"] is True
     assert result.update["combat"]["participants"]["fighter_companion"]["hp"] == 10
+    assert "温良 将 治疗药水 投掷给 格林" in result.update["messages"][0].content
 
 
 def test_invisibility_potion_adds_breaking_invisible_condition():

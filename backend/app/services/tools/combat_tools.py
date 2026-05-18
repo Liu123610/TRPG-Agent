@@ -143,6 +143,128 @@ def _roll_initiative(unit: dict, *, surprised: bool) -> tuple[int, str]:
     return result.total, str(result)
 
 
+def _execute_start_combat(
+    combatant_ids: list[str],
+    surprised_ids: list[str] | str | None,
+    *,
+    state: dict,
+    tool_call_id: str | None = None,
+) -> Command | str:
+    """开战唯一实现；工具入口和 workflow 节点共用，避免两套先攻规则漂移。"""
+    surprised_ids = _normalize_string_list_arg("surprised_ids", surprised_ids, tool_call_id)
+    if isinstance(surprised_ids, Command):
+        return surprised_ids
+
+    scene_units: dict = state.get("scene_units") or {}
+    if hasattr(scene_units, "items"):
+        scene_raw = {k: v.model_dump() if hasattr(v, "model_dump") else dict(v) for k, v in scene_units.items()}
+    else:
+        scene_raw = {}
+
+    if not combatant_ids and not scene_raw:
+        return "场景中没有任何单位。请先使用 spawn_monsters 或 spawn_ally 生成参战单位。"
+
+    # 玩家自动入场 — 直接在 player_dict 上叠加战斗字段，不再复制到 participants
+    player_raw = state.get("player")
+    player_dict: dict | None = None
+    if player_raw:
+        player_dict = player_raw.model_dump() if hasattr(player_raw, "model_dump") else dict(player_raw)
+        prepare_player_for_combat(player_dict)
+
+    player_id = str(player_dict.get("id")) if player_dict else ""
+    participants: dict[str, dict] = {}
+    missing: list[str] = []
+    for uid in combatant_ids:
+        if uid == player_id:
+            continue
+        unit = scene_raw.get(uid)
+        if unit:
+            participants[uid] = unit
+        else:
+            missing.append(uid)
+
+    if missing:
+        available_ids = [unit_id for unit_id in scene_raw.keys()]
+        if player_id:
+            available_ids.append(player_id)
+        available = ", ".join(available_ids) or "无"
+        return f"找不到以下单位: {', '.join(missing)}。场景中可用单位: {available}"
+
+    if not participants and not player_dict:
+        return "没有参战者，请先生成怪物或加载角色卡。"
+
+    for uid, unit in list(participants.items()):
+        if unit.get("side") == "ally" or unit.get("unit_kind") == "character":
+            prepare_character_for_combat(unit, side=unit.get("side", "ally"), fallback_id=uid)
+            participants[uid] = unit
+
+    # 为所有参战单位投先攻（含玩家）
+    all_units: dict[str, dict] = dict(participants)
+    if player_dict:
+        all_units[player_dict["id"]] = player_dict
+
+    state = {**state, "space": canonicalize_player_space(state.get("space"), player_dict)}
+    if space_error := _validate_combat_space(state, list(all_units)):
+        return Command(update={"messages": [ToolMessage(content=space_error, tool_call_id=tool_call_id)]})
+
+    surprised_set, surprise_missing = _resolve_surprised_ids(surprised_ids or [], all_units, player_dict)
+    if surprise_missing:
+        available = ", ".join(all_units.keys()) or "无"
+        return Command(update={"messages": [
+            ToolMessage(
+                content=f"无法开始战斗：找不到被突袭单位 {', '.join(surprise_missing)}。可用单位: {available}",
+                tool_call_id=tool_call_id,
+            )
+        ]})
+
+    initiative_list: list[tuple[str, int, str, bool]] = []
+    for uid, p in all_units.items():
+        surprised = uid in surprised_set
+        init_total, roll_text = _roll_initiative(p, surprised=surprised)
+        p["initiative"] = init_total
+        p["surprised"] = surprised
+        initiative_list.append((uid, init_total, roll_text, surprised))
+
+    initiative_list.sort(key=lambda x: x[1], reverse=True)
+    order = [uid for uid, _, _, _ in initiative_list]
+
+    # combat.participants 仅存 NPC/怪物
+    combat_dict = {
+        "round": 1,
+        "participants": participants,
+        "initiative_order": order,
+        "current_actor_id": order[0],
+    }
+
+    order_desc = "\n".join(
+        f"  {i+1}. {all_units[uid].get('name', uid)} [ID: {uid}] "
+        f"(先攻 {init}{'，突袭劣势' if surprised else ''}；{roll_text})"
+        for i, (uid, init, roll_text, surprised) in enumerate(initiative_list)
+    )
+
+    update: dict = {
+        "combat": combat_dict,
+        "phase": "combat",
+        "active_combat_message_start": _active_combat_start_index(state),
+        "messages": [
+            ToolMessage(
+                content=(
+                    "战斗开始！第 1 回合。\n"
+                    "先攻已经由工具完成结算；突袭单位的先攻劣势已计入下列骰式。"
+                    "必须以此先攻顺序和当前行动者为准，不要自行重排或补骰。\n"
+                    f"先攻顺序：\n{order_desc}\n\n"
+                    f"当前行动者：{all_units[order[0]].get('name', order[0])} [ID: {order[0]}]"
+                ),
+                tool_call_id=tool_call_id,
+            )
+        ],
+    }
+    if player_dict:
+        update["player"] = player_dict
+
+    return Command(update=update)
+
+
 # 场景单位公共实现：聚合入口和旧工具共用，避免两套生成/清理逻辑漂移。
 def _spawn_ally_impl(
     profile_id: str,
@@ -266,6 +388,117 @@ def manage_scene_units(
 
 
 @tool
+def prepare_combat_start(
+    combatant_ids: list[str],
+    surprised_ids: list[str] | str | None = None,
+    map_plan: dict | None = None,
+    placements: list[dict] | None = None,
+    reason: str = "",
+    *,
+    state: Annotated[dict, InjectedState] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
+) -> Command:
+    """提交开战计划，由工作流统一执行 start_combat。
+    这是探索叙事进入敌对轮次的边界工具：当伏击暴露、敌人开始攻击、玩家攻击或双方需要先攻/位置时，先提交开战计划，再叙述命中、伤害和回合推进。
+    你仍负责根据剧情决定入场怪物/友方数量、地图规模、单位落点和突袭对象；不要直接口头宣布先攻结果。
+    工作流会按 map_plan 建立或切换地图，按 placements 摆放单位，然后校验并投先攻。
+    新版突袭只把被突袭者写入 surprised_ids，使其先攻检定劣势。
+    map_plan 示例：{"action": "create", "name": "三猪小径伏击", "width": 150, "height": 120, "grid_size": 5}
+    placements 示例：[{"unit_id": "player", "x": 20, "y": 60}, {"unit_id": "goblin_1", "x": 70, "y": 45}]
+
+    Args:
+        combatant_ids: 参加本次战斗的非玩家单位 ID 列表；敌人和友方都要列入。
+        surprised_ids: 被突袭单位 ID；可用 "player" 指代当前玩家。
+        map_plan: 地图方案。action="create" 创建并激活新地图；action="switch" 切到已有 map_id；不传则使用当前地图。
+        placements: 本次开战前的单位落点，由你根据剧情决定坐标；unit_id 可用 "player" 指代当前玩家。
+        reason: 简短说明为什么这些单位入场、谁被突袭。
+    """
+    normalized_surprised = _normalize_string_list_arg("surprised_ids", surprised_ids, tool_call_id)
+    if isinstance(normalized_surprised, Command):
+        return normalized_surprised
+    return Command(update={
+        "pending_combat_start": {
+            "combatant_ids": [str(unit_id) for unit_id in combatant_ids],
+            "surprised_ids": normalized_surprised,
+            "map_plan": map_plan,
+            "placements": list(placements or []),
+            "reason": reason,
+        },
+        "messages": [ToolMessage(
+            content=(
+                "已提交开战计划，工作流将统一建图/切图、摆位、校验参战单位和突袭对象后开战。"
+                f" 参战单位: {', '.join(combatant_ids)}。"
+                f" 被突袭: {', '.join(normalized_surprised) if normalized_surprised else '无'}。"
+                f" 地图: {map_plan or '沿用当前地图'}。"
+                f" 落点数量: {len(placements or [])}。"
+                f" 裁定理由: {reason or '未填写'}。"
+            ),
+            tool_call_id=tool_call_id,
+            additional_kwargs={"hidden_from_ui": True},
+        )],
+    })
+
+
+@tool
+def delegate_combat_turn(
+    actor_id: str,
+    instruction: str,
+    *,
+    state: Annotated[dict, InjectedState] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
+) -> Command:
+    """把当前行动者的本回合交给战斗执行器。
+    主 Agent 只需描述战术意图；执行器会用精简战斗上下文调用移动/攻击/施法等工具，
+    并返回完整工具轨迹、前端战斗事件和是否建议结束回合。
+
+    Args:
+        actor_id: 当前行动者 ID，必须等于 combat.current_actor_id。
+        instruction: 本回合战术意图，例如“保持距离用短弓攻击玩家，若射程不足先靠近”。
+    """
+    return Command(update={
+        "pending_combat_executor": {
+            "actor_id": actor_id,
+            "instruction": instruction,
+        },
+        "messages": [ToolMessage(
+            content=f"已委托战斗执行器处理 {actor_id} 的回合。指令: {instruction}",
+            tool_call_id=tool_call_id,
+            additional_kwargs={"hidden_from_ui": True},
+        )],
+    })
+
+
+@tool
+def prepare_combat_end(
+    outcomes: list[dict],
+    reason: str = "",
+    *,
+    state: Annotated[dict, InjectedState] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
+) -> Command:
+    """提交战斗结束计划，由工作流统一结算离场、俘虏、死亡档案和战斗 XP。
+    每个仍在战斗中的非玩家单位都应有 outcome；不要直接调用 end_combat 跳过分类。
+    result 可用：killed/dead、captured/surrendered/subdued/defeated、fled/escaped/retreated/departed、ally_safe。
+    被俘、投降、被驱散、非致命击败但 HP 仍大于 0 的敌人必须标为 captured/surrendered/subdued/defeated，工作流会自动给 XP。
+
+    Args:
+        outcomes: 单位结局列表，例如 [{"unit_id": "goblin_1", "result": "captured"}]。
+        reason: 简短说明战斗如何收束。
+    """
+    return Command(update={
+        "pending_combat_end": {
+            "outcomes": list(outcomes or []),
+            "reason": reason,
+        },
+        "messages": [ToolMessage(
+            content=f"已提交战斗结束计划，工作流将校验单位结局并统一结算 XP。结局数量: {len(outcomes or [])}。",
+            tool_call_id=tool_call_id,
+            additional_kwargs={"hidden_from_ui": True},
+        )],
+    })
+
+
+@tool
 def spawn_ally(
     profile_id: str,
     name: str | None = None,
@@ -326,112 +559,12 @@ def start_combat(
         combatant_ids: 从场景单位池中参加本次战斗的非玩家单位 ID 列表；敌人和友方都要放进来，不要把玩家 ID 放进来。
         surprised_ids: 被突袭的单位 ID；这些单位先攻检定用劣势。可用 "player" 指代当前玩家。
     """
-    surprised_ids = _normalize_string_list_arg("surprised_ids", surprised_ids, tool_call_id)
-    if isinstance(surprised_ids, Command):
-        return surprised_ids
-
-    scene_units: dict = state.get("scene_units") or {}
-    if hasattr(scene_units, "items"):
-        scene_raw = {k: v.model_dump() if hasattr(v, "model_dump") else dict(v) for k, v in scene_units.items()}
-    else:
-        scene_raw = {}
-
-    if not combatant_ids and not scene_raw:
-        return "场景中没有任何单位。请先使用 spawn_monsters 或 spawn_ally 生成参战单位。"
-
-    participants: dict[str, dict] = {}
-    missing: list[str] = []
-    for uid in combatant_ids:
-        unit = scene_raw.get(uid)
-        if unit:
-            participants[uid] = unit
-        else:
-            missing.append(uid)
-
-    if missing:
-        available = ", ".join(scene_raw.keys()) or "无"
-        return f"找不到以下单位: {', '.join(missing)}。场景中可用单位: {available}"
-
-    # 玩家自动入场 — 直接在 player_dict 上叠加战斗字段，不再复制到 participants
-    player_raw = state.get("player")
-    player_dict: dict | None = None
-    if player_raw:
-        player_dict = player_raw.model_dump() if hasattr(player_raw, "model_dump") else dict(player_raw)
-        prepare_player_for_combat(player_dict)
-
-    if not participants and not player_dict:
-        return "没有参战者，请先生成怪物或加载角色卡。"
-
-    for uid, unit in list(participants.items()):
-        if unit.get("side") == "ally" or unit.get("unit_kind") == "character":
-            prepare_character_for_combat(unit, side=unit.get("side", "ally"), fallback_id=uid)
-            participants[uid] = unit
-
-    # 为所有参战单位投先攻（含玩家）
-    all_units: dict[str, dict] = dict(participants)
-    if player_dict:
-        all_units[player_dict["id"]] = player_dict
-
-    state = {**state, "space": canonicalize_player_space(state.get("space"), player_dict)}
-    if space_error := _validate_combat_space(state, list(all_units)):
-        return Command(update={"messages": [ToolMessage(content=space_error, tool_call_id=tool_call_id)]})
-
-    surprised_set, surprise_missing = _resolve_surprised_ids(surprised_ids or [], all_units, player_dict)
-    if surprise_missing:
-        available = ", ".join(all_units.keys()) or "无"
-        return Command(update={"messages": [
-            ToolMessage(
-                content=f"无法开始战斗：找不到被突袭单位 {', '.join(surprise_missing)}。可用单位: {available}",
-                tool_call_id=tool_call_id,
-            )
-        ]})
-
-    initiative_list: list[tuple[str, int, str, bool]] = []
-    for uid, p in all_units.items():
-        surprised = uid in surprised_set
-        init_total, roll_text = _roll_initiative(p, surprised=surprised)
-        p["initiative"] = init_total
-        p["surprised"] = surprised
-        initiative_list.append((uid, init_total, roll_text, surprised))
-
-    initiative_list.sort(key=lambda x: x[1], reverse=True)
-    order = [uid for uid, _, _, _ in initiative_list]
-
-    # combat.participants 仅存 NPC/怪物
-    combat_dict = {
-        "round": 1,
-        "participants": participants,
-        "initiative_order": order,
-        "current_actor_id": order[0],
-    }
-
-    order_desc = "\n".join(
-        f"  {i+1}. {all_units[uid].get('name', uid)} [ID: {uid}] "
-        f"(先攻 {init}{'，突袭劣势' if surprised else ''}；{roll_text})"
-        for i, (uid, init, roll_text, surprised) in enumerate(initiative_list)
+    return _execute_start_combat(
+        combatant_ids,
+        surprised_ids,
+        state=state,
+        tool_call_id=tool_call_id,
     )
-
-    update: dict = {
-        "combat": combat_dict,
-        "phase": "combat",
-        "active_combat_message_start": _active_combat_start_index(state),
-        "messages": [
-            ToolMessage(
-                content=(
-                    "战斗开始！第 1 回合。\n"
-                    "先攻已经由工具完成结算；突袭单位的先攻劣势已计入下列骰式。"
-                    "必须以此先攻顺序和当前行动者为准，不要自行重排或补骰。\n"
-                    f"先攻顺序：\n{order_desc}\n\n"
-                    f"当前行动者：{all_units[order[0]].get('name', order[0])} [ID: {order[0]}]"
-                ),
-                tool_call_id=tool_call_id,
-            )
-        ],
-    }
-    if player_dict:
-        update["player"] = player_dict
-
-    return Command(update=update)
 
 
 @tool

@@ -5,8 +5,10 @@ export interface CombatLeftRailState {
   player: PlayerState | null
   combat: Record<string, any> | null
   space: Record<string, any> | null
+  sceneUnits?: Record<string, any> | null
   selectedUnit: AvailabilitySelectionUnit | null
   sendCombatActionRequest?: ((message: string) => Promise<void>) | null
+  endCombatTurnRequest?: ((actorId: string) => Promise<void>) | null
   onActionNotice?: ((text: string) => void) | null
 }
 

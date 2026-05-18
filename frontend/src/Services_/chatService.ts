@@ -58,6 +58,13 @@ export type PendingAction = {
 
 export type ChatResponsePayload = {
   reply?: string
+  message?: string
+  events?: Array<{
+    type: 'assistant_message' | 'dice_roll' | 'combat_action' | 'tool_message'
+    payload?: DiceRollEvent
+    content?: string
+    hp_changes?: HpChange[]
+  }>
   plan?: string | null
   session_id?: string
   pending_action?: PendingAction | null
@@ -89,6 +96,65 @@ export class ChatApiError extends Error {
     this.status = status
     this.code = code
     this.requestId = requestId
+  }
+}
+
+const readSSEStream = async (response: Response, callbacks: SSECallbacks): Promise<void> => {
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let diceAnimationQueue: Promise<void> = Promise.resolve()
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const events = parseSSEChunk(buffer)
+
+    const lastNewline = buffer.lastIndexOf('\n\n')
+    buffer = lastNewline >= 0 ? buffer.slice(lastNewline + 2) : buffer
+
+    for (const { event, data } of events) {
+      try {
+        const parsed = JSON.parse(data)
+        switch (event) {
+          case 'assistant_message':
+            callbacks.onAssistantMessage?.(parsed.content)
+            break
+          case 'combat_action':
+            callbacks.onCombatAction?.(parsed.content, parsed.hp_changes || [])
+            break
+          case 'tool_message':
+            callbacks.onToolMessage?.(parsed.content)
+            break
+          case 'dice_roll':
+            if (callbacks.onDiceRoll) {
+              diceAnimationQueue = diceAnimationQueue
+                .catch(() => undefined)
+                .then(() => Promise.resolve(callbacks.onDiceRoll?.(parsed)))
+                .catch((error) => {
+                  console.error('Dice animation failed:', error)
+                })
+            }
+            break
+          case 'state_update':
+            callbacks.onStateUpdate?.(parsed.player, parsed.combat, parsed.scene_units, parsed.dead_units, parsed.space)
+            break
+          case 'pending_action':
+            callbacks.onPendingAction?.(parsed ?? null)
+            break
+          case 'done':
+            callbacks.onDone?.(parsed.session_id)
+            break
+          case 'error':
+            callbacks.onError?.(parsed.message)
+            break
+        }
+      } catch {
+        // 解析失败则跳过
+      }
+    }
   }
 }
 
@@ -212,63 +278,7 @@ export const chatService = {
       )
     }
 
-    const reader = response.body!.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let diceAnimationQueue: Promise<void> = Promise.resolve()
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const events = parseSSEChunk(buffer)
-
-      // 保留未消费的不完整行
-      const lastNewline = buffer.lastIndexOf('\n\n')
-      buffer = lastNewline >= 0 ? buffer.slice(lastNewline + 2) : buffer
-
-      for (const { event, data } of events) {
-        try {
-          const parsed = JSON.parse(data)
-          switch (event) {
-            case 'assistant_message':
-              callbacks.onAssistantMessage?.(parsed.content)
-              break
-            case 'combat_action':
-              callbacks.onCombatAction?.(parsed.content, parsed.hp_changes || [])
-              break
-            case 'tool_message':
-              callbacks.onToolMessage?.(parsed.content)
-              break
-            case 'dice_roll':
-              if (callbacks.onDiceRoll) {
-                diceAnimationQueue = diceAnimationQueue
-                  .catch(() => undefined)
-                  .then(() => Promise.resolve(callbacks.onDiceRoll?.(parsed)))
-                  .catch((error) => {
-                    console.error('Dice animation failed:', error)
-                  })
-              }
-              break
-            case 'state_update':
-              callbacks.onStateUpdate?.(parsed.player, parsed.combat, parsed.scene_units, parsed.dead_units, parsed.space)
-              break
-            case 'pending_action':
-              callbacks.onPendingAction?.(parsed ?? null)
-              break
-            case 'done':
-              callbacks.onDone?.(parsed.session_id)
-              break
-            case 'error':
-              callbacks.onError?.(parsed.message)
-              break
-          }
-        } catch {
-          // 解析失败则跳过
-        }
-      }
-    }
+    await readSSEStream(response, callbacks)
   },
 
   // 历史消息接口
@@ -301,5 +311,66 @@ export const chatService = {
     }
 
     return { messages: [], player: null, combat: null }
+  },
+
+  async endCombatTurn(params: {
+    session_id: string
+    actor_id: string
+  }): Promise<ChatResponsePayload> {
+    const response = await fetch('/api/chat/combat/end-turn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    })
+
+    if (!response.ok) {
+      let parsed: { message: string; code?: string; requestId?: string } = { message: '' }
+      try {
+        const body = await response.json()
+        parsed = parseErrorPayload(body)
+      } catch {
+        parsed = { message: '' }
+      }
+      throw new ChatApiError(
+        response.status,
+        parsed.message || `请求失败（HTTP ${response.status}）`,
+        parsed.code,
+        parsed.requestId
+      )
+    }
+
+    return await response.json()
+  },
+
+  async endCombatTurnStream(
+    params: {
+      session_id: string
+      actor_id: string
+    },
+    callbacks: SSECallbacks
+  ): Promise<void> {
+    const response = await fetch('/api/chat/combat/end-turn/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    })
+
+    if (!response.ok) {
+      let parsed: { message: string; code?: string; requestId?: string } = { message: '' }
+      try {
+        const body = await response.json()
+        parsed = parseErrorPayload(body)
+      } catch {
+        parsed = { message: '' }
+      }
+      throw new ChatApiError(
+        response.status,
+        parsed.message || `请求失败（HTTP ${response.status}）`,
+        parsed.code,
+        parsed.requestId
+      )
+    }
+
+    await readSSEStream(response, callbacks)
   }
 }

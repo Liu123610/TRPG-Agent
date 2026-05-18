@@ -40,7 +40,12 @@
           </div>
 
           <div class="sheet-footer">
-            <button type="button" class="end-turn-btn" @click="emit('endTurn')">
+            <button
+              type="button"
+              class="end-turn-btn"
+              :disabled="disabledEndTurn"
+              @click="emit('endTurn')"
+            >
               结束回合
             </button>
           </div>
@@ -58,6 +63,7 @@ const props = defineProps<{
   actorName: string
   groups: CombatActionMenuGroup[]
   selectedTargetName?: string
+  disabledEndTurn?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -297,6 +303,13 @@ const handleItemClick = (item: CombatActionMenuItem) => {
   box-shadow:
     0 14px 30px rgba(127, 29, 29, 0.34),
     0 0 0 1px rgba(255, 255, 255, 0.06) inset;
+}
+
+.end-turn-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+  transform: none;
+  box-shadow: none;
 }
 
 .end-turn-btn:active {

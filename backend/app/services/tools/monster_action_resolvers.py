@@ -442,10 +442,9 @@ def _resolve_save_effect(actor: dict, target: dict, save, hp_changes: list[dict]
 
 
 def _resolve_nimble_escape(actor: dict) -> dict:
-    """地精机敏逃脱：用官方动作语义直接挂 Hide/Disengage 的战斗收益。"""
+    """地精灵巧逃脱：当前项目默认采用撤离收益，避免把 Hide 自动等同为不可被攻击。"""
     upsert_condition(actor, create_condition("disengaged", source_id=actor.get("id", "")), replace_existing=True)
-    upsert_condition(actor, create_condition("hidden", source_id=actor.get("id", "")), replace_existing=True)
-    lines = [f"{actor.get('name', '?')} 使用 Nimble Escape：获得撤离与隐藏状态。"]
+    lines = [f"{actor.get('name', '?')} 使用 Nimble Escape：本回合移动不会触发借机攻击。"]
     return {"lines": lines, "hp_changes": [], "attack_roll": None}
 
 

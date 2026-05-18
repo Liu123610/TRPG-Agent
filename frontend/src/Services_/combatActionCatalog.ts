@@ -167,7 +167,7 @@ function buildWeaponItems(
       label: translateWeaponName(weapon.name),
       detail: [weapon.damage_dice, weapon.damage_type].filter(Boolean).join(' · ') || '近战攻击',
       accent: 'weapon',
-      command: `我在本回合使用武器攻击，使用${translateWeaponName(weapon.name)}${targetClause}。`,
+      command: `${buildActorCommandLead(context)}使用武器攻击，使用${translateWeaponName(weapon.name)}${targetClause}。`,
       disabledReason: resolveBlockingReason({
         reasonMap,
         usage: 'action',
@@ -202,7 +202,7 @@ function buildSpellItems(
             ? '附赠动作法术。'
             : '标准施法。',
         accent: 'spell',
-        command: `我在本回合施放法术“${translated}”${buildTargetClause(context.selectedUnit, 'enemy')}。`,
+        command: `${buildActorCommandLead(context)}施放法术“${translated}”${buildTargetClause(context.selectedUnit, 'enemy')}。`,
         disabledReason: slotBlocked || resolveBlockingReason({
           reasonMap,
           usage,
@@ -222,8 +222,10 @@ function buildItemItems(
   return inventory.map((item, index) => {
     const label = resolveInventoryItemLabel(item)
     const quantity = Math.max(1, item.quantity ?? 1)
+    const usage = resolveItemUsage(item)
     const detailParts = [
       resolveInventoryItemKind(item),
+      usage === 'bonus_action' ? '附赠动作' : '动作',
       quantity > 1 ? `数量 x${quantity}` : '单件',
       item.description?.trim() || '',
     ].filter(Boolean)
@@ -233,10 +235,10 @@ function buildItemItems(
       label,
       detail: detailParts.join(' · '),
       accent: 'item',
-      command: `我在本回合使用道具“${label}”。`,
+      command: `${buildActorCommandLead(context)}使用道具“${label}”。`,
       disabledReason: resolveBlockingReason({
         reasonMap,
-        usage: 'action',
+        usage,
         targetMode: 'none',
         enemyCount: countLivingEnemies(context.combat, resolvePlayerUnitId(context.player)),
       }),
@@ -268,7 +270,7 @@ function buildClassActionItems(
         label: action.label,
         detail: action.detail,
         accent: 'class',
-        command: `我在本回合使用职业动作“${action.label}”${selectedTarget}。`,
+        command: `${buildActorCommandLead(context)}使用职业动作“${action.label}”${selectedTarget}。`,
         disabledReason: resourceBlocked || extraActionBlocked || resolveBlockingReason({
           reasonMap,
           usage: action.usage,
@@ -293,7 +295,7 @@ function buildCombatActionItems(
       label: action.label,
       detail: action.detail,
       accent: 'combat',
-      command: `我在本回合选择战斗动作“${action.label}”${targetClause}。`,
+      command: `${buildActorCommandLead(context)}选择战斗动作“${action.label}”${targetClause}。`,
       disabledReason: resolveBlockingReason({
         reasonMap,
         usage: action.usage,
@@ -378,6 +380,16 @@ function buildTargetClause(selectedUnit: AvailabilitySelectionUnit | null | unde
   return `，目标是 ${selectedUnit.name}`
 }
 
+function buildActorCommandLead(context: CombatActionMenuContext): string {
+  const actor = context.player as PlayerState & { id?: string; side?: string }
+  const actorId = resolvePlayerUnitId(actor)
+  const actorName = normalizeText(actor.name) || actorId || '当前单位'
+  if (actor.side === 'ally') {
+    return `我接管友方 ${actorName} [ID:${actorId}] 的回合，令其`
+  }
+  return '我在本回合'
+}
+
 function isFriendlyUnit(side: string): boolean {
   return side === 'player' || side === 'ally'
 }
@@ -406,6 +418,10 @@ function resolveInventoryItemKind(item: InventoryItemData): string {
   if (item.type === 'potion') return '药水'
   if (item.type === 'item') return '道具'
   return translateItemName(item.id || item.name_en || item.name || 'item')
+}
+
+function resolveItemUsage(item: InventoryItemData): ActionUsage {
+  return item.type === 'potion' ? 'bonus_action' : 'action'
 }
 
 function normalizeText(value: unknown): string {
