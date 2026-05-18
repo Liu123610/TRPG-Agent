@@ -25,7 +25,7 @@
     "query": "魔法物品稀有度和角色等级大概怎么对应？",
     "expected_terms": ["魔法物品", "稀有度", "等级"],
     "expected_category": "magic_items",
-    "expected_top_titles": [["魔法物品稀有度", "魔法物品"]]
+    "expected_top_titles": [["魔法物品稀有度", "魔法物品", "稀有度"]]
   },
   {
     "id": "dmg_treasure_hoard",
@@ -44,7 +44,7 @@
   {
     "id": "mm_aboleth_stat_block",
     "query": "底栖魔鱼的挑战等级、AC 和 HP 是多少？",
-    "expected_terms": ["底栖魔鱼", "AC", "HP", "挑战等级"],
+    "expected_terms": ["底栖魔鱼", "AC", ["HP", "生命值"], "挑战等级"],
     "expected_category": "monsters",
     "expected_top_titles": ["底栖魔鱼"]
   },

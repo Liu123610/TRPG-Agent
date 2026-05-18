@@ -1,5 +1,7 @@
 ﻿"""Graph node function implementations."""
 
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
+from dataclasses import dataclass
 import json
 from functools import lru_cache
 from time import perf_counter
@@ -8,18 +10,45 @@ from typing import Any
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
+from app.config.settings import settings
 from app.graph.constants import COMBAT_AGENT_MODE, NARRATIVE_AGENT_MODE, STATE_DEATH_SAVE_PAUSE_TURN_KEY
 from app.graph.state import GraphState
 from app.memory.context_assembler import (
     ContextAssembler,
     build_runtime_state_message,
+    is_internal_system_human_message,
+    is_runtime_state_message,
+    _latest_external_human_text,
     message_content_to_text as _message_content_to_text,
     state_value_to_dict as _state_value_to_dict,
 )
 from app.prompts import get_assistant_system_prompt
+from app.rag.auto_rule_evidence import AutoRuleEvidenceEvaluation, evaluate_auto_rule_evidence, mark_auto_rule_rag_timed_out
 from app.services.llm_service import LLMService
 from app.services.tools import get_tool_profile
-from app.utils.agent_trace import fail_llm_trace, finish_llm_trace, start_llm_trace
+from app.utils.agent_trace import (
+    fail_llm_trace,
+    finish_llm_trace,
+    start_auto_rule_rag_trace,
+    start_llm_trace,
+    timeout_auto_rule_rag_trace,
+)
+
+
+_OPTIONAL_RAG_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="auto-rule-rag")
+
+
+@dataclass(frozen=True, slots=True)
+class OptionalRuleRagTask:
+    """保存机会型 RAG 后台任务和 trace 元数据，超时后仍可对齐同一 invocation。"""
+
+    future: Future
+    invocation_id: str
+    started_at: str
+    started_perf: float
+    query: str
+    top_k: int
+    timeout_ms: int
 
 
 @lru_cache(maxsize=1)
@@ -653,12 +682,21 @@ def _invoke_assistant(state: GraphState, mode: str) -> dict:
 
     assembler = _get_context_assembler()
     base_system_prompt = get_assistant_system_prompt(mode)
-    assembled_context = assembler.assemble(state, mode, base_system_prompt=base_system_prompt)
+    session_id = str(state.get("session_id") or "detached")
+    phase = state.get("phase")
+    optional_rag_future = _start_optional_rule_rag(state, mode, session_id)
+    required_context = assembler.assemble_required(state, mode, base_system_prompt=base_system_prompt)
+    optional_rag_evaluation = _wait_optional_rule_rag(optional_rag_future, session_id)
+    if optional_rag_evaluation and optional_rag_evaluation.evidence:
+        assembled_context = assembler.append_optional_runtime_context(
+            required_context,
+            [optional_rag_evaluation.evidence],
+        )
+    else:
+        assembled_context = assembler.append_optional_runtime_context(required_context, [])
     runtime_state_message = build_runtime_state_message(assembled_context.runtime_state_text)
     invocation_messages = [*assembled_context.model_input_messages, runtime_state_message]
     tools = _get_assistant_tools_for_state(state, mode)
-    session_id = str(state.get("session_id") or "detached")
-    phase = state.get("phase")
 
     logger.info(
         "Assistant invocation mode={} session={} messages={} tools={}",
@@ -764,6 +802,81 @@ def _is_agent_controlled_combat_turn(state: GraphState) -> bool:
 
     control_mode = str(actor.get("control_mode") or actor.get("controlled_by") or "").lower()
     return bool(actor.get("autopilot") or actor.get("llm_controlled") or control_mode in {"ai", "llm", "agent"})
+
+
+def _start_optional_rule_rag(state: GraphState, mode: str, session_id: str) -> OptionalRuleRagTask | None:
+    """实验开关开启时启动机会型规则 RAG；默认路径完全不创建后台任务。"""
+    if not settings.auto_rule_rag_enabled or mode != NARRATIVE_AGENT_MODE:
+        return None
+
+    messages = list(state.get("messages", []))
+    if not _last_message_is_external_human(messages):
+        return None
+
+    query = _latest_external_human_text(messages)
+    if not query:
+        return None
+
+    invocation_id, started_at = start_auto_rule_rag_trace(
+        session_id,
+        query=query,
+        top_k=settings.auto_rule_rag_top_k,
+        timeout_ms=settings.auto_rule_rag_timeout_ms,
+        min_score=settings.auto_rule_rag_min_score,
+    )
+    started_perf = perf_counter()
+    future = _OPTIONAL_RAG_EXECUTOR.submit(
+        evaluate_auto_rule_evidence,
+        query,
+        session_id=session_id,
+        invocation_id=invocation_id,
+        started_at=started_at,
+    )
+    return OptionalRuleRagTask(
+        future=future,
+        invocation_id=invocation_id,
+        started_at=started_at,
+        started_perf=started_perf,
+        query=query,
+        top_k=settings.auto_rule_rag_top_k,
+        timeout_ms=settings.auto_rule_rag_timeout_ms,
+    )
+
+
+def _last_message_is_external_human(messages: list[BaseMessage]) -> bool:
+    """机会型 RAG 只响应新玩家输入，避免工具返回后的二次 assistant 重复检索。"""
+    if not messages:
+        return False
+    last_message = messages[-1]
+    return (
+        isinstance(last_message, HumanMessage)
+        and not is_runtime_state_message(last_message)
+        and not is_internal_system_human_message(last_message)
+    )
+
+
+def _wait_optional_rule_rag(task: OptionalRuleRagTask | None, session_id: str) -> AutoRuleEvidenceEvaluation | None:
+    """只等待短窗口；超时和失败都不影响主模型调用。"""
+    if task is None:
+        return None
+
+    timeout_seconds = max(float(task.timeout_ms), 0.0) / 1000
+    try:
+        return task.future.result(timeout=timeout_seconds)
+    except TimeoutError:
+        mark_auto_rule_rag_timed_out(task.invocation_id)
+        timeout_auto_rule_rag_trace(
+            session_id,
+            invocation_id=task.invocation_id,
+            started_at=task.started_at,
+            duration_ms=(perf_counter() - task.started_perf) * 1000,
+            query=task.query,
+            top_k=task.top_k,
+            timeout_ms=task.timeout_ms,
+        )
+        return None
+    except Exception:
+        return None
 
 
 def _keep_first_tool_call(response: BaseMessage) -> BaseMessage:

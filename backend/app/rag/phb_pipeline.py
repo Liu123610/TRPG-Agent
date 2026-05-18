@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import pickle
 import re
@@ -13,10 +14,10 @@ from typing import Iterable
 import fitz
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.config.settings import settings
+from app.rag.embeddings import build_embeddings
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_PHB_PATH = (
@@ -29,6 +30,7 @@ DEFAULT_PHB_PATH = (
 )
 DEFAULT_REPORT_PATH = BACKEND_DIR / "data" / "rag_build_reports" / "phb_cn_sections.jsonl"
 DEFAULT_DB_PATH = BACKEND_DIR / "data" / "rag_phb_cn_db"
+VECTOR_READY_MARKER = "VECTOR_READY"
 
 SOURCE_TAG = "phb_cn"
 BOOK_TITLE = "玩家手册"
@@ -239,6 +241,22 @@ def _line_in_span(line: PdfLine, start: PhbAnchor, end: PhbAnchor | None) -> boo
     return True
 
 
+def _span_lines(
+    lines: list[PdfLine],
+    line_keys: list[tuple[int, int, float]],
+    start: PhbAnchor,
+    end: PhbAnchor | None,
+) -> list[PdfLine]:
+    start_key = _reading_key(start.page_index, start.x0, max(start.y0 - 3.0, 0.0))
+    start_index = bisect.bisect_left(line_keys, start_key)
+    if end is None:
+        return lines[start_index:]
+
+    end_key = _reading_key(end.page_index, end.x0, max(end.y0 - 3.0, 0.0))
+    end_index = bisect.bisect_left(line_keys, end_key)
+    return lines[start_index:end_index]
+
+
 def _is_title_line(line: PdfLine) -> bool:
     return line.max_size >= 11.5 or line.color not in {0, 197381}
 
@@ -368,9 +386,10 @@ def build_sections(pdf_path: Path, *, limit: int | None = None, min_chars: int =
 
     drafts: list[SectionDraft] = []
     emit_anchors = anchors[:limit] if limit else anchors
+    line_keys = [_reading_key(line.page_index, line.x0, line.y0) for line in lines]
     for index, anchor in enumerate(emit_anchors):
         next_anchor = anchors[index + 1] if index + 1 < len(anchors) else None
-        span_lines = [line for line in lines if _line_in_span(line, anchor, next_anchor)]
+        span_lines = _span_lines(lines, line_keys, anchor, next_anchor)
         text = _merge_text_lines(span_lines)
         if len(text) < min_chars:
             continue
@@ -431,19 +450,31 @@ def _reset_db_dir(path: Path) -> None:
 
 
 def build_vector_index(documents: list[Document], db_path: Path) -> None:
-    embeddings = OpenAIEmbeddings(
-        model=settings.embedding_model,
-        api_key=settings.embedding_api_key,
-        base_url=settings.embedding_base_url,
-        check_embedding_ctx_length=False,
-        chunk_size=10,
-    )
+    bm25_backup = (db_path / "bm25_index.pkl").read_bytes() if (db_path / "bm25_index.pkl").exists() else None
+    embeddings = build_embeddings(settings)
+    resume = (db_path / "chroma.sqlite3").exists() and not (db_path / VECTOR_READY_MARKER).exists()
+    if not resume:
+        _reset_db_dir(db_path)
+    try:
+        vectorstore = Chroma(
+            persist_directory=str(db_path),
+            embedding_function=embeddings,
+        )
+        start_index = vectorstore._collection.count() if resume else 0
+        for start in range(start_index, len(documents), 16):
+            vectorstore.add_documents(documents[start : start + 16])
+        with (db_path / "bm25_index.pkl").open("wb") as file:
+            pickle.dump(documents, file)
+        (db_path / VECTOR_READY_MARKER).write_text("ok\n", encoding="utf-8")
+    except Exception:
+        if bm25_backup is not None:
+            (db_path / "bm25_index.pkl").write_bytes(bm25_backup)
+        raise
+
+
+# 离线评估不能依赖外部 embedding 服务；BM25-only 索引用来测本地召回下限。
+def build_bm25_index(documents: list[Document], db_path: Path) -> None:
     _reset_db_dir(db_path)
-    Chroma.from_documents(
-        documents,
-        embedding=embeddings,
-        persist_directory=str(db_path),
-    )
     with (db_path / "bm25_index.pkl").open("wb") as file:
         pickle.dump(documents, file)
 
@@ -469,6 +500,7 @@ def main() -> None:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     parser.add_argument("--limit", type=int, default=120, help="只处理前 N 个 TOC 锚点，便于先看样本质量。")
     parser.add_argument("--build-index", action="store_true", help="写入独立 PHB 测试向量索引。")
+    parser.add_argument("--build-bm25", action="store_true", help="只写入 BM25 索引，便于无 embedding key 时离线评估。")
     args = parser.parse_args()
 
     sections = build_sections(args.pdf, limit=args.limit)
@@ -476,10 +508,12 @@ def main() -> None:
     write_report(sections, args.report)
     if args.build_index:
         build_vector_index(chunks, args.db)
+    elif args.build_bm25:
+        build_bm25_index(chunks, args.db)
 
     print(json.dumps(_summary(sections, chunks), ensure_ascii=False, indent=2))
     print(f"Report: {args.report}")
-    if args.build_index:
+    if args.build_index or args.build_bm25:
         print(f"ChromaDB: {args.db}")
 
 

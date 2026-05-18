@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import pickle
 import re
@@ -12,11 +13,11 @@ from typing import Callable, Iterable
 import fitz
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.config.settings import settings
 from app.rag import phb_pipeline
+from app.rag.embeddings import build_embeddings
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 BOOKS_DIR = Path.home() / "Downloads" / "DND_5E" / "DND_5E_规则书" / "三宝书"
@@ -25,6 +26,7 @@ DEFAULT_DMG_PATH = BOOKS_DIR / "DND_5E_城主指南CN.pdf"
 DEFAULT_MM_PATH = BOOKS_DIR / "DND_5E_怪物图鉴CN.pdf"
 DEFAULT_REPORT_PATH = BACKEND_DIR / "data" / "rag_build_reports" / "core_cn_sections.jsonl"
 DEFAULT_DB_PATH = BACKEND_DIR / "data" / "rag_core_cn_db"
+VECTOR_READY_MARKER = "VECTOR_READY"
 
 SKIP_LAYOUT_TITLES = {
     "制作组",
@@ -199,6 +201,37 @@ def _line_in_span(
     return True
 
 
+def _span_lines(
+    lines: list[phb_pipeline.PdfLine],
+    line_keys: list[tuple[int, int, float]],
+    start: LayoutAnchor,
+    end: LayoutAnchor | None,
+    *,
+    parallel_page_spans: bool = False,
+) -> list[phb_pipeline.PdfLine]:
+    start_key = phb_pipeline._reading_key(start.page_index, start.x0, max(start.y0 - 3.0, 0.0))
+    start_index = bisect.bisect_left(line_keys, start_key)
+    if end is None:
+        return lines[start_index:]
+
+    end_key = phb_pipeline._reading_key(end.page_index, end.x0, max(end.y0 - 3.0, 0.0))
+    end_index = bisect.bisect_left(line_keys, end_key)
+    span = lines[start_index:end_index]
+    if not (
+        parallel_page_spans
+        and start.page_index == end.page_index
+        and start.x0 < 300
+        and end.x0 < 300
+    ):
+        return span
+
+    right_start_key = phb_pipeline._reading_key(start.page_index, 300.0, max(start.y0 - 3.0, 0.0))
+    right_end_key = phb_pipeline._reading_key(end.page_index, 300.0, max(end.y0 - 3.0, 0.0))
+    right_start_index = bisect.bisect_left(line_keys, right_start_key)
+    right_end_index = bisect.bisect_left(line_keys, right_end_key)
+    return [*span, *lines[right_start_index:right_end_index]]
+
+
 def _section_record(spec: LayoutBookSpec, anchor: LayoutAnchor, lines: list[phb_pipeline.PdfLine]) -> phb_pipeline.SectionRecord:
     text = phb_pipeline._merge_text_lines(lines)
     page_end = lines[-1].page_index + 1 if lines else anchor.page_index + 1
@@ -225,18 +258,16 @@ def build_layout_sections(spec: LayoutBookSpec, *, limit: int | None = None, min
 
     sections: list[phb_pipeline.SectionRecord] = []
     emit_anchors = anchors[:limit] if limit else anchors
+    line_keys = [phb_pipeline._reading_key(line.page_index, line.x0, line.y0) for line in lines]
     for index, anchor in enumerate(emit_anchors):
         next_anchor = anchors[index + 1] if index + 1 < len(anchors) else None
-        span_lines = [
-            line
-            for line in lines
-            if _line_in_span(
-                line,
-                anchor,
-                next_anchor,
-                parallel_page_spans=spec.parallel_page_spans,
-            )
-        ]
+        span_lines = _span_lines(
+            lines,
+            line_keys,
+            anchor,
+            next_anchor,
+            parallel_page_spans=spec.parallel_page_spans,
+        )
         text = phb_pipeline._merge_text_lines(span_lines)
         if len(text) < min_chars:
             continue
@@ -333,23 +364,32 @@ def _reset_db_dir(path: Path) -> None:
 
 
 def build_vector_index(documents: list[Document], db_path: Path) -> None:
-    embeddings = OpenAIEmbeddings(
-        model=settings.embedding_model,
-        api_key=settings.embedding_api_key,
-        base_url=settings.embedding_base_url,
-        timeout=settings.embedding_timeout_seconds,
-        max_retries=settings.embedding_max_retries,
-        check_embedding_ctx_length=False,
-        chunk_size=10,
-    )
+    bm25_backup = (db_path / "bm25_index.pkl").read_bytes() if (db_path / "bm25_index.pkl").exists() else None
+    embeddings = build_embeddings(settings)
+    resume = (db_path / "chroma.sqlite3").exists() and not (db_path / VECTOR_READY_MARKER).exists()
+    if not resume:
+        _reset_db_dir(db_path)
+    try:
+        vectorstore = Chroma(
+            persist_directory=str(db_path),
+            embedding_function=embeddings,
+        )
+        start_index = vectorstore._collection.count() if resume else 0
+        # 三宝书中有大量表格与中英混排条目；小批量写入能更快定位供应商输入限制问题。
+        for start in range(start_index, len(documents), 16):
+            vectorstore.add_documents(documents[start : start + 16])
+        with (db_path / "bm25_index.pkl").open("wb") as file:
+            pickle.dump(documents, file)
+        (db_path / VECTOR_READY_MARKER).write_text("ok\n", encoding="utf-8")
+    except Exception:
+        if bm25_backup is not None:
+            (db_path / "bm25_index.pkl").write_bytes(bm25_backup)
+        raise
+
+
+# 离线评估先保证本地 BM25 基线可重复运行，避免外部 embedding 不可用时完全无报告。
+def build_bm25_index(documents: list[Document], db_path: Path) -> None:
     _reset_db_dir(db_path)
-    vectorstore = Chroma(
-        persist_directory=str(db_path),
-        embedding_function=embeddings,
-    )
-    # 三宝书中有大量表格与中英混排条目；小批量写入能更快定位供应商输入限制问题。
-    for start in range(0, len(documents), 64):
-        vectorstore.add_documents(documents[start : start + 64])
     with (db_path / "bm25_index.pkl").open("wb") as file:
         pickle.dump(documents, file)
 
@@ -380,6 +420,7 @@ def main() -> None:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     parser.add_argument("--limit", type=int, default=0, help="每本书只处理前 N 个锚点；0 表示全量。")
     parser.add_argument("--build-index", action="store_true", help="写入三宝书向量索引。")
+    parser.add_argument("--build-bm25", action="store_true", help="只写入 BM25 索引，便于无 embedding key 时离线评估。")
     args = parser.parse_args()
 
     limit = args.limit or None
@@ -388,10 +429,12 @@ def main() -> None:
     write_report(sections, args.report)
     if args.build_index:
         build_vector_index(chunks, args.db)
+    elif args.build_bm25:
+        build_bm25_index(chunks, args.db)
 
     print(json.dumps(_summary(sections, chunks), ensure_ascii=False, indent=2))
     print(f"Report: {args.report}")
-    if args.build_index:
+    if args.build_index or args.build_bm25:
         print(f"ChromaDB: {args.db}")
 
 

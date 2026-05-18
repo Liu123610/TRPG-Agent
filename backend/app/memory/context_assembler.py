@@ -43,6 +43,15 @@ class NoopExternalContextProvider:
         return []
 
 
+@dataclass(frozen=True, slots=True)
+class OptionalContextBlock:
+    """机会型上下文只服务本轮调用，不能写入历史消息或替代必需状态。"""
+
+    title: str
+    content: str
+    source: str = "optional"
+
+
 def _node_source_pages(node: Any) -> str:
     """以 source_refs 为准展示页码；旧节点保留 page_start/page_end。"""
     refs = getattr(node, "source_refs", []) or []
@@ -269,11 +278,18 @@ class AdventureNodeRetrievalContextProvider:
 
 
 @dataclass(slots=True)
-class AssembledContext:
+class RequiredContext:
+    """主模型调用的必需上下文；剧情、战斗与工具状态都必须稳定进入这里。"""
+
     system_prompt: str
     hud_text: str
     runtime_state_text: str
     model_input_messages: list[BaseMessage]
+
+
+@dataclass(slots=True)
+class AssembledContext(RequiredContext):
+    """保留旧类型名，避免调用方和测试在拆分期间感知实现细节。"""
 
 
 class ContextAssembler:
@@ -284,14 +300,51 @@ class ContextAssembler:
 
     def assemble(self, state: GraphState, mode: str, *, base_system_prompt: str) -> AssembledContext:
         """把图状态投影为一次模型调用所需的完整上下文。"""
+        required = self.assemble_required(state, mode, base_system_prompt=base_system_prompt)
+        return AssembledContext(
+            system_prompt=required.system_prompt,
+            hud_text=required.hud_text,
+            runtime_state_text=required.runtime_state_text,
+            model_input_messages=required.model_input_messages,
+        )
+
+    def assemble_required(self, state: GraphState, mode: str, *, base_system_prompt: str) -> RequiredContext:
+        """只组装不可丢弃上下文，供后续机会型 RAG 在外层追加短期证据。"""
         hud_text = self.build_hud_text(state)
         runtime_state_text = self.build_runtime_state_text(state, mode)
-        return AssembledContext(
+        return RequiredContext(
             system_prompt=self.build_system_prompt(state, mode, base_system_prompt),
             hud_text=hud_text,
             runtime_state_text=runtime_state_text,
             model_input_messages=self.build_model_input_messages(state, mode, runtime_state_text),
         )
+
+    def append_optional_runtime_context(
+        self,
+        required_context: RequiredContext,
+        optional_blocks: list[OptionalContextBlock],
+    ) -> AssembledContext:
+        """把赶上的机会型证据附加到本轮状态帧，不重建历史消息窗口。"""
+        rendered_blocks = [self._format_optional_context_block(block) for block in optional_blocks if block.content.strip()]
+        if not rendered_blocks:
+            return AssembledContext(
+                system_prompt=required_context.system_prompt,
+                hud_text=required_context.hud_text,
+                runtime_state_text=required_context.runtime_state_text,
+                model_input_messages=required_context.model_input_messages,
+            )
+
+        runtime_state_text = required_context.runtime_state_text + "\n\n[机会型上下文]\n" + "\n\n".join(rendered_blocks)
+        return AssembledContext(
+            system_prompt=required_context.system_prompt,
+            hud_text=required_context.hud_text,
+            runtime_state_text=runtime_state_text,
+            model_input_messages=required_context.model_input_messages,
+        )
+
+    def _format_optional_context_block(self, block: OptionalContextBlock) -> str:
+        """保留来源标签，方便 trace 对照自动规则证据是否被注入。"""
+        return f"[{block.title} | source={block.source}]\n{block.content.strip()}"
 
     def build_system_prompt(self, state: GraphState, mode: str, base_system_prompt: str) -> str:
         # 中文注释：系统提示词只保留稳定规则，避免每轮状态变化破坏 DeepSeek 前缀缓存。

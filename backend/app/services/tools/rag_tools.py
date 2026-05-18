@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import re
+from time import perf_counter
 from pathlib import Path
 from typing import Literal, Optional
 
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from app.config.settings import settings
 from app.rag.retriever import TRPGHybridRetriever
+from app.utils.agent_trace import (
+    fail_rule_rag_trace,
+    finish_rule_rag_trace,
+    start_rule_rag_trace,
+)
 
 # Initialize lazily to prevent delay at module import length
 _hybrid_retriever = None
@@ -154,6 +161,26 @@ def _format_rule_evidence(query: str, effective_filter: Optional[RuleCategory], 
     )
 
 
+def _trace_fragment(doc) -> dict:
+    metadata = doc.metadata or {}
+    excerpt = _clean_rule_excerpt(doc.page_content or "", 220)
+    return {
+        "source": metadata.get("source", "Unknown"),
+        "category": metadata.get("category"),
+        "sub_category": _doc_sub_category(doc),
+        "chapter": metadata.get("chapter") or metadata.get("book", "unknown"),
+        "section": metadata.get("section") or metadata.get("section_path") or metadata.get("title", "unknown"),
+        "page_start": metadata.get("page_start", "unknown"),
+        "page_end": metadata.get("page_end", metadata.get("page_start", "unknown")),
+        "excerpt": excerpt,
+    }
+
+
+def _trace_session_id(config: RunnableConfig | None) -> str:
+    configurable = (config or {}).get("configurable", {}) if config else {}
+    return str(configurable.get("thread_id") or "detached")
+
+
 class ConsultRulesInput(BaseModel):
     query: str = Field(
         ...,
@@ -168,6 +195,7 @@ class ConsultRulesInput(BaseModel):
 def consult_rules_handbook(
     query: str,
     filter_category: Optional[RuleCategory] = None,
+    config: RunnableConfig = None,
 ) -> str:
     """
     用于查询 D&D 5E 的基础规则、机制等。
@@ -176,17 +204,38 @@ def consult_rules_handbook(
     """
     global _hybrid_retriever, _active_rag_profile
 
+    top_k = 6
+    session_id = _trace_session_id(config)
+    invocation_id, started_at = start_rule_rag_trace(
+        session_id,
+        query=query,
+        filter_category=filter_category,
+        top_k=top_k,
+    )
+    started_perf = perf_counter()
+
     try:
         if _hybrid_retriever is None or _active_rag_profile != settings.rag_profile:
             _hybrid_retriever = _build_rules_retriever()
             _active_rag_profile = settings.rag_profile
 
-        results = _hybrid_retriever.search(
+        results, diagnostics = _hybrid_retriever.search_with_diagnostics(
             query,
             filter_category=filter_category,
-            top_k=6,
+            top_k=top_k,
         )
         if not results:
+            failure_reason = diagnostics.failure_reason or "no_results"
+            fail_rule_rag_trace(
+                session_id,
+                invocation_id=invocation_id,
+                started_at=started_at,
+                duration_ms=(perf_counter() - started_perf) * 1000,
+                query=query,
+                filter_category=filter_category,
+                top_k=top_k,
+                failure_reason=failure_reason,
+            )
             return "未在规则手册中找到相关信息。"
 
         # 规则工具二次清洗：剔除噪声/HUD/过短片段，降低“有来源无正文”的概率。
@@ -194,7 +243,33 @@ def consult_rules_handbook(
         if cleaned_results:
             results = cleaned_results
 
-        return _format_rule_evidence(query, filter_category, results[:3])
+        final_results = results[:3]
+        finish_rule_rag_trace(
+            session_id,
+            invocation_id=invocation_id,
+            started_at=started_at,
+            duration_ms=(perf_counter() - started_perf) * 1000,
+            query=query,
+            filter_category=filter_category,
+            top_k=top_k,
+            candidate_count=diagnostics.candidate_count,
+            bm25_candidate_count=diagnostics.bm25_candidate_count,
+            vector_candidate_count=diagnostics.vector_candidate_count,
+            rerank_duration_ms=diagnostics.rerank_duration_ms,
+            top_scores=diagnostics.top_scores or [],
+            returned_fragments=[_trace_fragment(doc) for doc in final_results],
+        )
+        return _format_rule_evidence(query, filter_category, final_results)
     except Exception as e:
+        fail_rule_rag_trace(
+            session_id,
+            invocation_id=invocation_id,
+            started_at=started_at,
+            duration_ms=(perf_counter() - started_perf) * 1000,
+            query=query,
+            filter_category=filter_category,
+            top_k=top_k,
+            failure_reason=str(e),
+        )
         return f"查询规则册时发生错误: {str(e)}"
 
