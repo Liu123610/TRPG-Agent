@@ -12,9 +12,15 @@ from app.utils.agent_trace import (
     render_trace_markdown,
     start_llm_trace,
     start_adventure_director_trace,
+    start_rule_rag_trace,
+    finish_rule_rag_trace,
+    fail_rule_rag_trace,
+    finish_auto_rule_rag_trace,
     trace_adventure_runtime_update,
     trace_chat_request,
     trace_chat_result,
+    start_auto_rule_rag_trace,
+    timeout_auto_rule_rag_trace,
 )
 
 
@@ -212,3 +218,133 @@ def test_adventure_director_trace_records_failures(tmp_path: Path):
         "adventure_director_failed",
     ]
     assert events[1]["payload"]["error_type"] == "RuntimeError"
+
+
+def test_rule_rag_trace_records_completed_and_failed_events(tmp_path: Path):
+    invocation_id, started_at = start_rule_rag_trace(
+        "session-rag",
+        query="目盲是什么效果？",
+        filter_category="conditions",
+        top_k=6,
+        trace_dir=tmp_path,
+    )
+
+    finish_rule_rag_trace(
+        "session-rag",
+        invocation_id=invocation_id,
+        started_at=started_at,
+        duration_ms=18.4,
+        query="目盲是什么效果？",
+        filter_category="conditions",
+        top_k=6,
+        candidate_count=12,
+        bm25_candidate_count=8,
+        vector_candidate_count=4,
+        rerank_duration_ms=7.5,
+        top_scores=[0.91, 0.82],
+        returned_fragments=[
+            {
+                "source": "phb_cn",
+                "category": "conditions",
+                "sub_category": "conditions_blinded",
+                "excerpt": "目盲生物不能看见。",
+            }
+        ],
+        trace_dir=tmp_path,
+    )
+
+    failed_id, failed_at = start_rule_rag_trace(
+        "session-rag",
+        query="不存在的规则",
+        filter_category=None,
+        top_k=6,
+        trace_dir=tmp_path,
+    )
+    fail_rule_rag_trace(
+        "session-rag",
+        invocation_id=failed_id,
+        started_at=failed_at,
+        duration_ms=2.1,
+        query="不存在的规则",
+        filter_category=None,
+        top_k=6,
+        failure_reason="no_results",
+        trace_dir=tmp_path,
+    )
+
+    events = load_trace_events("session-rag", trace_dir=tmp_path)
+
+    assert [event["event_type"] for event in events] == [
+        "rule_rag_started",
+        "rule_rag_completed",
+        "rule_rag_started",
+        "rule_rag_failed",
+    ]
+    assert events[1]["payload"]["candidate_count"] == 12
+    assert events[1]["payload"]["bm25_candidate_count"] == 8
+    assert events[1]["payload"]["vector_candidate_count"] == 4
+    assert events[1]["payload"]["rerank_duration_ms"] == 7.5
+    assert events[1]["payload"]["top_scores"] == [0.91, 0.82]
+    assert events[1]["payload"]["returned_fragments"][0]["source"] == "phb_cn"
+    assert events[3]["payload"]["failure_reason"] == "no_results"
+
+
+def test_auto_rule_rag_trace_records_completed_and_timeout_events(tmp_path: Path):
+    invocation_id, started_at = start_auto_rule_rag_trace(
+        "session-auto-rag",
+        query="半身掩护有什么效果？",
+        top_k=6,
+        timeout_ms=800,
+        min_score=0.5,
+        trace_dir=tmp_path,
+    )
+
+    finish_auto_rule_rag_trace(
+        "session-auto-rag",
+        invocation_id=invocation_id,
+        started_at=started_at,
+        duration_ms=120.0,
+        query="半身掩护有什么效果？",
+        top_k=6,
+        candidate_count=10,
+        bm25_candidate_count=10,
+        vector_candidate_count=0,
+        rerank_duration_ms=80.0,
+        top_scores=[0.83, 0.71],
+        injected=True,
+        reason="injected",
+        returned_fragments=[{"source": "phb_cn", "excerpt": "半身掩护提供加值。"}],
+        trace_dir=tmp_path,
+    )
+
+    timeout_id, timeout_started_at = start_auto_rule_rag_trace(
+        "session-auto-rag",
+        query="黑龙是什么怪物？",
+        top_k=6,
+        timeout_ms=1,
+        min_score=0.5,
+        trace_dir=tmp_path,
+    )
+    timeout_auto_rule_rag_trace(
+        "session-auto-rag",
+        invocation_id=timeout_id,
+        started_at=timeout_started_at,
+        duration_ms=1.2,
+        query="黑龙是什么怪物？",
+        top_k=6,
+        timeout_ms=1,
+        trace_dir=tmp_path,
+    )
+
+    events = load_trace_events("session-auto-rag", trace_dir=tmp_path)
+
+    assert [event["event_type"] for event in events] == [
+        "rule_auto_rag_started",
+        "rule_auto_rag_completed",
+        "rule_auto_rag_started",
+        "rule_auto_rag_timed_out",
+    ]
+    assert events[1]["payload"]["injected"] is True
+    assert events[1]["payload"]["reason"] == "injected"
+    assert events[3]["payload"]["injected"] is False
+    assert events[3]["payload"]["reason"] == "timeout"

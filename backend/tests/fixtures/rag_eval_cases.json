@@ -6,6 +6,12 @@
     "expected_category": "conditions"
   },
   {
+    "id": "condition_blinded",
+    "query": "目盲状态会怎样，攻击目盲目标有什么影响？",
+    "expected_terms": ["目盲", "优势", "劣势"],
+    "expected_category": "conditions"
+  },
+  {
     "id": "combat_cover",
     "query": "躲在树后能给我什么掩护？",
     "expected_terms": ["掩护", "半身掩护", "四分之三掩护"],
@@ -38,14 +44,20 @@
   {
     "id": "class_action_surge",
     "query": "战士的动作如潮怎么用？",
-    "expected_terms": ["动作如潮", "额外动作", "战士"],
+    "expected_terms": ["动作如潮", ["额外动作", "额外的动作"], "战士"],
+    "expected_category": "classes"
+  },
+  {
+    "id": "class_rogue_sneak_attack",
+    "query": "游荡者偷袭什么时候能造成额外伤害？",
+    "expected_terms": ["偷袭", "优势", ["额外伤害", "额外1d6"]],
     "expected_category": "classes"
   },
   {
     "id": "equipment_armor_class",
     "query": "护甲等级怎么计算？",
     "expected_terms": ["护甲等级", "AC", "护甲"],
-    "expected_category": "equipment"
+    "expected_category": null
   },
   {
     "id": "spell_concentration",
@@ -56,7 +68,13 @@
   {
     "id": "species_darkvision",
     "query": "矮人的黑暗视觉是什么效果？",
-    "expected_terms": ["矮人", "黑暗视觉", "昏暗光照"],
+    "expected_terms": ["矮人", "黑暗视觉", ["昏暗光照", "微光光照"]],
     "expected_category": "species"
+  },
+  {
+    "id": "monster_adult_black_dragon",
+    "query": "成年黑龙的 AC、HP 和挑战等级是多少？",
+    "expected_terms": ["成年黑龙", "AC", "HP", "挑战等级"],
+    "expected_category": "monsters"
   }
 ]

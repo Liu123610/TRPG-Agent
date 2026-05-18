@@ -348,6 +348,202 @@ def trace_adventure_runtime_failed(
     )
 
 
+def start_rule_rag_trace(
+    session_id: str,
+    *,
+    query: str,
+    filter_category: str | None,
+    top_k: int,
+    trace_dir: str | Path | None = None,
+) -> tuple[str, str]:
+    """记录规则工具检索入口，为后续机会型 RAG 提供耗时基线。"""
+    invocation_id = str(uuid4())
+    started_at = _now_iso()
+    append_trace_event(
+        session_id,
+        "rule_rag_started",
+        {
+            "invocation_id": invocation_id,
+            "started_at": started_at,
+            "query": query,
+            "filter_category": filter_category,
+            "top_k": top_k,
+        },
+        trace_dir=trace_dir,
+    )
+    return invocation_id, started_at
+
+
+def finish_rule_rag_trace(
+    session_id: str,
+    *,
+    invocation_id: str,
+    started_at: str,
+    duration_ms: float,
+    query: str,
+    filter_category: str | None,
+    top_k: int,
+    candidate_count: int,
+    bm25_candidate_count: int,
+    vector_candidate_count: int,
+    rerank_duration_ms: float,
+    top_scores: list[float],
+    returned_fragments: list[dict[str, Any]],
+    trace_dir: str | Path | None = None,
+) -> Path | None:
+    """记录规则工具最终返回了哪些片段，便于判断召回和重排质量。"""
+    return append_trace_event(
+        session_id,
+        "rule_rag_completed",
+        {
+            "invocation_id": invocation_id,
+            "started_at": started_at,
+            "completed_at": _now_iso(),
+            "duration_ms": round(duration_ms, 3),
+            "query": query,
+            "filter_category": filter_category,
+            "top_k": top_k,
+            "candidate_count": candidate_count,
+            "bm25_candidate_count": bm25_candidate_count,
+            "vector_candidate_count": vector_candidate_count,
+            "rerank_duration_ms": round(rerank_duration_ms, 3),
+            "top_scores": top_scores,
+            "returned_fragments": returned_fragments,
+        },
+        trace_dir=trace_dir,
+    )
+
+
+def fail_rule_rag_trace(
+    session_id: str,
+    *,
+    invocation_id: str,
+    started_at: str,
+    duration_ms: float,
+    query: str,
+    filter_category: str | None,
+    top_k: int,
+    failure_reason: str,
+    trace_dir: str | Path | None = None,
+) -> Path | None:
+    """规则工具失败时记录原因；工具自身仍按既有行为返回错误文本。"""
+    return append_trace_event(
+        session_id,
+        "rule_rag_failed",
+        {
+            "invocation_id": invocation_id,
+            "started_at": started_at,
+            "failed_at": _now_iso(),
+            "duration_ms": round(duration_ms, 3),
+            "query": query,
+            "filter_category": filter_category,
+            "top_k": top_k,
+            "failure_reason": failure_reason,
+        },
+        trace_dir=trace_dir,
+    )
+
+
+def start_auto_rule_rag_trace(
+    session_id: str,
+    *,
+    query: str,
+    top_k: int,
+    timeout_ms: int,
+    min_score: float,
+    trace_dir: str | Path | None = None,
+) -> tuple[str, str]:
+    """记录机会型规则 RAG 启动；该路径默认关闭，只服务实验对比。"""
+    invocation_id = str(uuid4())
+    started_at = _now_iso()
+    append_trace_event(
+        session_id,
+        "rule_auto_rag_started",
+        {
+            "invocation_id": invocation_id,
+            "started_at": started_at,
+            "query": query,
+            "top_k": top_k,
+            "timeout_ms": timeout_ms,
+            "min_score": min_score,
+        },
+        trace_dir=trace_dir,
+    )
+    return invocation_id, started_at
+
+
+def finish_auto_rule_rag_trace(
+    session_id: str,
+    *,
+    invocation_id: str,
+    started_at: str,
+    duration_ms: float,
+    query: str,
+    top_k: int,
+    candidate_count: int,
+    bm25_candidate_count: int,
+    vector_candidate_count: int,
+    rerank_duration_ms: float,
+    top_scores: list[float],
+    injected: bool,
+    reason: str,
+    returned_fragments: list[dict[str, Any]],
+    trace_dir: str | Path | None = None,
+) -> Path | None:
+    """记录机会型 RAG 是否赶上并注入，便于和纯工具路径对比。"""
+    return append_trace_event(
+        session_id,
+        "rule_auto_rag_completed",
+        {
+            "invocation_id": invocation_id,
+            "started_at": started_at,
+            "completed_at": _now_iso(),
+            "duration_ms": round(duration_ms, 3),
+            "query": query,
+            "top_k": top_k,
+            "candidate_count": candidate_count,
+            "bm25_candidate_count": bm25_candidate_count,
+            "vector_candidate_count": vector_candidate_count,
+            "rerank_duration_ms": round(rerank_duration_ms, 3),
+            "top_scores": top_scores,
+            "injected": injected,
+            "reason": reason,
+            "returned_fragments": returned_fragments,
+        },
+        trace_dir=trace_dir,
+    )
+
+
+def timeout_auto_rule_rag_trace(
+    session_id: str,
+    *,
+    invocation_id: str,
+    started_at: str,
+    duration_ms: float,
+    query: str,
+    top_k: int,
+    timeout_ms: int,
+    trace_dir: str | Path | None = None,
+) -> Path | None:
+    """机会型检索超时必须 fail closed，本轮不注入证据。"""
+    return append_trace_event(
+        session_id,
+        "rule_auto_rag_timed_out",
+        {
+            "invocation_id": invocation_id,
+            "started_at": started_at,
+            "timed_out_at": _now_iso(),
+            "duration_ms": round(duration_ms, 3),
+            "query": query,
+            "top_k": top_k,
+            "timeout_ms": timeout_ms,
+            "injected": False,
+            "reason": "timeout",
+        },
+        trace_dir=trace_dir,
+    )
+
+
 def start_llm_trace(
     session_id: str,
     *,

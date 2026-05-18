@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BACKEND_DIR = ROOT_DIR / "backend"
@@ -19,6 +19,7 @@ from langchain_core.documents import Document  # noqa: E402
 
 from app.rag.phb_pipeline import DEFAULT_DB_PATH, DEFAULT_PHB_PATH, build_chunk_documents, build_sections  # noqa: E402
 from app.rag.retriever import TRPGHybridRetriever  # noqa: E402
+from app.rag.retriever import RetrievalDiagnostics  # noqa: E402
 
 DEFAULT_CASES_PATH = BACKEND_DIR / "tests" / "fixtures" / "phb_cn_eval_cases.json"
 DEFAULT_REPORT_PATH = BACKEND_DIR / "data" / "rag_build_reports" / "phb_cn_eval.json"
@@ -47,6 +48,10 @@ def _load_cases(path: Path) -> list[EvalCase]:
     ]
 
 
+def _resolve_workspace_path(path: Path) -> Path:
+    return path if path.is_absolute() else ROOT_DIR / path
+
+
 def _load_chunk_documents(pdf_path: Path) -> list[Document]:
     return build_chunk_documents(build_sections(pdf_path, limit=None))
 
@@ -62,6 +67,17 @@ def _contains_all_terms(text: str, terms: list[str | list[str]]) -> tuple[bool, 
     return len(hits) == len(terms), hits
 
 
+def _document_eval_text(docs: list[Document]) -> str:
+    parts: list[str] = []
+    for doc in docs:
+        parts.extend(
+            str(doc.metadata.get(key) or "")
+            for key in ("title", "section_path", "category")
+        )
+        parts.append(doc.page_content)
+    return "\n".join(parts)
+
+
 def _matches_any_title(title: str, expected_titles: list[str | list[str]]) -> tuple[bool, str | None]:
     if not expected_titles:
         return True, None
@@ -75,9 +91,26 @@ def _matches_any_title(title: str, expected_titles: list[str | list[str]]) -> tu
     return False, None
 
 
-def _evaluate_case(retriever: TRPGHybridRetriever, case: EvalCase, top_k: int) -> dict:
-    docs = retriever.search(case.query, filter_category=case.expected_category, top_k=top_k)
-    joined = "\n".join(doc.page_content for doc in docs)
+def _diagnostics_payload(diagnostics: RetrievalDiagnostics, result_count: int) -> dict[str, Any]:
+    return {
+        "result_count": result_count,
+        "candidate_count": diagnostics.candidate_count,
+        "bm25_candidate_count": diagnostics.bm25_candidate_count,
+        "vector_candidate_count": diagnostics.vector_candidate_count,
+        "rerank_duration_ms": diagnostics.rerank_duration_ms,
+        "top_scores": diagnostics.top_scores or [],
+        "failure_reason": diagnostics.failure_reason,
+    }
+
+
+# PHB/Core 共用评估逻辑，报告要暴露候选与 rerank 指标来定位丢失层级。
+def _evaluate_case(retriever: TRPGHybridRetriever, case: EvalCase, top_k: int) -> dict[str, Any]:
+    docs, diagnostics = retriever.search_with_diagnostics(
+        case.query,
+        filter_category=case.expected_category,
+        top_k=top_k,
+    )
+    joined = _document_eval_text(docs)
     term_hit, hit_terms = _contains_all_terms(joined, case.expected_terms)
     category_hit = any(doc.metadata.get("category") == case.expected_category for doc in docs)
     top_title = docs[0].metadata.get("title", "") if docs else ""
@@ -96,6 +129,7 @@ def _evaluate_case(retriever: TRPGHybridRetriever, case: EvalCase, top_k: int) -
         "expected_terms": case.expected_terms,
         "expected_category": case.expected_category,
         "expected_top_titles": case.expected_top_titles,
+        "diagnostics": _diagnostics_payload(diagnostics, len(docs)),
         "results": [
             {
                 "category": doc.metadata.get("category"),
@@ -124,11 +158,14 @@ def main(
     parser.add_argument("--report", type=Path, default=default_report_path)
     parser.add_argument("--top-k", type=int, default=5)
     args = parser.parse_args()
+    db_path = _resolve_workspace_path(args.db)
+    pdf_path = _resolve_workspace_path(args.pdf)
+    report_path = _resolve_workspace_path(args.report)
 
     cases = _load_cases(args.cases)
     retriever = TRPGHybridRetriever(
-        db_path=args.db,
-        bm25_documents=document_loader(args.pdf),
+        db_path=db_path,
+        bm25_documents=document_loader(pdf_path),
     )
     results = [_evaluate_case(retriever, case, args.top_k) for case in cases]
     passed = sum(1 for item in results if item["passed"])
@@ -140,15 +177,15 @@ def main(
         "results": results,
     }
 
-    args.report.parent.mkdir(parents=True, exist_ok=True)
-    args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({k: report[k] for k in ["total", "passed", "pass_rate", "top_k"]}, ensure_ascii=False, indent=2))
     for item in results:
         print(
             f"{'PASS' if item['passed'] else 'FAIL'} {item['id']} "
             f"terms={item['hit_terms']} top={item['top_title']}"
         )
-    print(f"Report: {args.report}")
+    print(f"Report: {report_path}")
 
 
 if __name__ == "__main__":

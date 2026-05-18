@@ -9,6 +9,7 @@ from app.memory.context_assembler import (
     ADVENTURE_NODE_FRAME_MESSAGE_PREFIX,
     AdventureNodeRetrievalContextProvider,
     ContextAssembler,
+    OptionalContextBlock,
     build_runtime_state_message,
     summarize_tool_message,
     trim_model_messages,
@@ -21,6 +22,88 @@ class _StaticContextProvider:
 
 
 class ContextAssemblerTests(unittest.TestCase):
+    def test_assemble_delegates_to_required_context_without_behavior_change(self):
+        assembler = ContextAssembler(external_context_provider=_StaticContextProvider())
+        state = {
+            "messages": [HumanMessage(content="我查看前方。")],
+            "player": {"id": "player_hero", "name": "英雄"},
+        }
+
+        assembled = assembler.assemble(state, NARRATIVE_AGENT_MODE, base_system_prompt="基础规则")
+        required = assembler.assemble_required(state, NARRATIVE_AGENT_MODE, base_system_prompt="基础规则")
+
+        self.assertEqual(required.system_prompt, assembled.system_prompt)
+        self.assertEqual(required.hud_text, assembled.hud_text)
+        self.assertEqual(required.runtime_state_text, assembled.runtime_state_text)
+        self.assertEqual(required.model_input_messages, assembled.model_input_messages)
+
+    def test_required_context_keeps_adventure_node_facts_out_of_optional_branch(self):
+        assembler = ContextAssembler()
+        state = {
+            "messages": [HumanMessage(content="我想去凡达林。")],
+            "adventure": {
+                "module_id": "lost_mine",
+                "active_node_id": "goblin_ambush",
+                "unlocked_node_ids": ["lost_mine_start", "goblin_ambush"],
+                "completed_node_ids": [],
+                "known_clue_ids": ["goblin_trail"],
+                "completed_event_ids": ["goblin_ambush_resolved"],
+                "pending_exit_option_ids": [],
+            },
+        }
+
+        required = assembler.assemble_required(state, NARRATIVE_AGENT_MODE, base_system_prompt="基础规则")
+
+        self.assertIn("[扩展上下文]", required.runtime_state_text)
+        self.assertIn("[冒险节点事实]", required.runtime_state_text)
+        self.assertIn("当前节点: 地精伏击 [ID:goblin_ambush]", required.runtime_state_text)
+        self.assertNotIn("[机会型上下文]", required.runtime_state_text)
+
+    def test_optional_runtime_context_is_explicit_and_ephemeral(self):
+        assembler = ContextAssembler()
+        state = {
+            "messages": [
+                HumanMessage(content="[系统:运行状态帧]\n[机会型上下文]\n旧规则证据不应残留。"),
+                HumanMessage(content="我躲到石柱后。"),
+            ],
+        }
+
+        required = assembler.assemble_required(state, NARRATIVE_AGENT_MODE, base_system_prompt="基础规则")
+        assembled = assembler.append_optional_runtime_context(
+            required,
+            [
+                OptionalContextBlock(
+                    title="规则证据候选",
+                    source="auto_rule_rag",
+                    content="半身掩护通常提供 AC 和敏捷豁免加值。",
+                )
+            ],
+        )
+
+        self.assertNotIn("[机会型上下文]", required.runtime_state_text)
+        self.assertIn("[机会型上下文]", assembled.runtime_state_text)
+        self.assertIn("[规则证据候选 | source=auto_rule_rag]", assembled.runtime_state_text)
+        self.assertIn("半身掩护通常提供 AC 和敏捷豁免加值。", assembled.runtime_state_text)
+        self.assertEqual(required.model_input_messages, assembled.model_input_messages)
+        projected_text = "\n".join(str(message.content) for message in assembled.model_input_messages)
+        self.assertNotIn("旧规则证据不应残留", projected_text)
+
+    def test_empty_optional_runtime_context_keeps_required_context_unchanged(self):
+        assembler = ContextAssembler()
+        required = assembler.assemble_required(
+            {"messages": [HumanMessage(content="继续。")]},
+            NARRATIVE_AGENT_MODE,
+            base_system_prompt="基础规则",
+        )
+
+        assembled = assembler.append_optional_runtime_context(
+            required,
+            [OptionalContextBlock(title="规则证据候选", content="   ", source="auto_rule_rag")],
+        )
+
+        self.assertEqual(required.runtime_state_text, assembled.runtime_state_text)
+        self.assertEqual(required.model_input_messages, assembled.model_input_messages)
+
     def test_assemble_includes_external_context_and_hud_without_hot_summary(self):
         assembler = ContextAssembler(external_context_provider=_StaticContextProvider())
         state = {
