@@ -108,9 +108,11 @@ export function useChatSender(
     }
   }
 
-  const sendTextMessage = async (text: string) => {
+  const sendTextMessage = async (text: string, options?: { silent?: boolean }) => {
     if (!text.trim()) return
-    addUserMessage(text)
+    if (!options?.silent) {
+      addUserMessage(text)
+    }
     await streamRequest({ session_id: sessionId.value, message: text })
   }
 

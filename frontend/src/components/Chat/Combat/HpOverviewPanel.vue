@@ -60,8 +60,11 @@
       :groups="actionGroups"
       :selected-target-name="selectedTargetName"
       :disabled-end-turn="!canEndCurrentTurn"
-      @close="actionSheetOpen = false"
+      :preferred-target="preferredActionTarget"
+      :target-options="targetOptions"
+      @close="closeActionSheet"
       @submit="handleActionSubmit"
+      @submit-with-target="handleTargetedActionSubmit"
       @blocked="handleActionBlocked"
       @end-turn="handleEndTurn"
     />
@@ -74,6 +77,7 @@ import CombatActionSheet from './CombatActionSheet.vue'
 import HpBar from '../SideCharacterPanel/HpBar.vue'
 import {
   buildCombatActionMenu,
+  buildCombatActionCommand,
   type CombatActionMenuGroup,
   type CombatActionMenuItem,
 } from '../../../Services_/combatActionCatalog'
@@ -94,12 +98,21 @@ type HpOverviewUnit = {
   isPlayerUnit: boolean
 }
 
+type CombatTargetOption = {
+  id: string
+  name: string
+  side: string
+  hp: number
+  maxHp: number
+}
+
 const props = defineProps<{
   externalPlayer: PlayerState | null
   combat?: Record<string, any> | null
   space?: Record<string, any> | null
   sceneUnits?: Record<string, any> | null
   selectedUnit?: AvailabilitySelectionUnit | null
+  actionSheetRequestId?: number
   sendCombatActionRequest?: ((message: string) => Promise<void>) | null
   endCombatTurnRequest?: ((actorId: string) => Promise<void>) | null
 }>()
@@ -108,7 +121,9 @@ const emit = defineEmits<{
 }>()
 
 const actionSheetOpen = ref(false)
+const preferredActionTarget = ref<CombatTargetOption | null>(null)
 const previousCurrentActorId = ref('')
+const lastHandledActionSheetRequestId = ref(0)
 
 const playerUnitId = computed(() => {
   if (!props.externalPlayer) return ''
@@ -229,19 +244,53 @@ const actionGroups = computed<CombatActionMenuGroup[]>(() => {
   })
 })
 
+const targetOptions = computed<CombatTargetOption[]>(() => {
+  return hpUnits.value
+    .filter((unit) => unit.side === 'enemy' && unit.hp > 0)
+    .map((unit) => ({
+      id: unit.id,
+      name: unit.name,
+      side: unit.side,
+      hp: unit.hp,
+      maxHp: unit.maxHp,
+    }))
+})
+
+const selectedEnemyTarget = computed<CombatTargetOption | null>(() => {
+  const selected = props.selectedUnit
+  if (!selected || selected.side !== 'enemy' || selected.isDead) return null
+  return targetOptions.value.find((unit) => unit.id === selected.id) ?? null
+})
+
 watch(
   currentActorId,
   (actorId) => {
     if (!actorId || actorId === previousCurrentActorId.value) return
     previousCurrentActorId.value = actorId
     const actor = hpUnits.value.find((unit) => unit.id === actorId)
+    preferredActionTarget.value = null
     actionSheetOpen.value = !!actor && actor.side !== 'enemy'
+  },
+  { immediate: true },
+)
+
+watch(
+  () => props.actionSheetRequestId ?? 0,
+  (requestId) => {
+    if (!requestId || requestId === lastHandledActionSheetRequestId.value) return
+    lastHandledActionSheetRequestId.value = requestId
+    if (!canOpenControlledActions.value || !selectedEnemyTarget.value) return
+
+    // 中文注释：地图双击敌人时，把该敌人锁成这次弹窗的优先目标，点击攻击动作后直接提交。
+    preferredActionTarget.value = selectedEnemyTarget.value
+    actionSheetOpen.value = true
   },
   { immediate: true },
 )
 
 const handleUnitClick = (unit: HpOverviewUnit) => {
   if (!unit.isCurrentActor || unit.side === 'enemy' || !canOpenControlledActions.value) return
+  preferredActionTarget.value = null
   actionSheetOpen.value = true
 }
 
@@ -254,8 +303,25 @@ const handleActionSubmit = async (item: CombatActionMenuItem) => {
     return
   }
 
-  actionSheetOpen.value = false
+  closeActionSheet()
   await props.sendCombatActionRequest(item.command)
+}
+
+/**
+ * 中文注释：武器等定向动作在面板层只补足目标，不重写后端动作协议。
+ */
+const handleTargetedActionSubmit = async (
+  payload: { item: CombatActionMenuItem; target: CombatTargetOption },
+) => {
+  if (!props.sendCombatActionRequest) {
+    emitActionNotice('当前聊天发送器不可用，暂时无法提交战斗动作。')
+    return
+  }
+
+  closeActionSheet()
+  await props.sendCombatActionRequest(
+    buildCombatActionCommand(payload.item.commandPrefix, payload.item.targetMode, payload.target),
+  )
 }
 
 const handleActionBlocked = (reason: string) => {
@@ -272,8 +338,13 @@ const handleEndTurn = async () => {
     return
   }
 
-  actionSheetOpen.value = false
+  closeActionSheet()
   await props.endCombatTurnRequest(currentActor.value.id)
+}
+
+const closeActionSheet = () => {
+  actionSheetOpen.value = false
+  preferredActionTarget.value = null
 }
 
 const emitActionNotice = (text: string) => {
@@ -424,14 +495,14 @@ function isRecord(value: unknown): value is Record<string, any> {
 
 .hp-overview-item {
   width: 100%;
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding: 14px;
   border: none;
   border-radius: 0;
-  background:
-    linear-gradient(180deg, rgba(24, 21, 19, 0.95) 0%, rgba(18, 16, 15, 0.95) 100%);
+  background: rgba(18, 16, 15, 0.95);
   color: inherit;
   text-align: left;
   transition:
@@ -439,8 +510,26 @@ function isRecord(value: unknown): value is Record<string, any> {
     background 0.26s ease,
     box-shadow 0.26s ease;
   box-shadow:
-    inset 0 10px 14px -14px rgba(0, 0, 0, 0.28),
-    inset 0 -12px 16px -16px rgba(0, 0, 0, 0.2);
+    inset 1px 0 0 rgba(255, 244, 219, 0.04);
+}
+
+/* 中文注释：左侧高光改为独立光带，避免 blur 阴影把亮度污染到上下边界。 */
+.hp-overview-item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  opacity: 0.6;
+  background: linear-gradient(90deg, rgba(255, 244, 219, 0.3) 0%, rgba(255, 244, 219, 0.1) 14%, rgba(255, 244, 219, 0.03) 62%, rgba(255, 244, 219, 0) 100%);
+  pointer-events: none;
+  transform-origin: left center;
+  animation: neutralGlow 2.4s ease-in-out infinite;
+  transition:
+    opacity 0.26s ease,
+    transform 0.26s ease,
+    background 0.26s ease;
 }
 
 .hp-overview-item + .hp-overview-item {
@@ -449,14 +538,12 @@ function isRecord(value: unknown): value is Record<string, any> {
 
 .hp-overview-item:first-child {
   box-shadow:
-    inset 0 1px 0 rgba(0, 0, 0, 0.2),
-    inset 0 -12px 16px -16px rgba(0, 0, 0, 0.2);
+    inset 1px 0 0 rgba(255, 244, 219, 0.05);
 }
 
 .hp-overview-item:last-child {
   box-shadow:
-    inset 0 10px 14px -14px rgba(0, 0, 0, 0.28),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.18);
+    inset 1px 0 0 rgba(255, 244, 219, 0.04);
 }
 
 .hp-overview-item:disabled {
@@ -469,36 +556,42 @@ function isRecord(value: unknown): value is Record<string, any> {
 
 .hp-overview-item.is-clickable:hover {
   transform: translateX(2px);
-  background:
-    linear-gradient(180deg, rgba(24, 21, 19, 0.96) 0%, rgba(18, 16, 15, 0.96) 100%);
+  background: rgba(18, 16, 15, 0.96);
   box-shadow:
-    inset 0 12px 18px -16px rgba(0, 0, 0, 0.28),
-    inset 0 -14px 18px -18px rgba(0, 0, 0, 0.2),
-    0 0 18px rgba(209, 178, 110, 0.08);
+    inset 1px 0 0 rgba(255, 244, 219, 0.08);
+}
+
+.hp-overview-item.is-clickable:hover::before {
+  opacity: 0.5;
+  transform: scaleX(1.04);
 }
 
 .hp-overview-item.is-active {
-  background:
-    linear-gradient(180deg, rgba(24, 21, 19, 0.96) 0%, rgba(18, 16, 15, 0.96) 100%);
+  background: rgba(18, 16, 15, 0.96);
   box-shadow:
-    inset 0 12px 18px -16px rgba(0, 0, 0, 0.3),
-    inset 0 -14px 18px -18px rgba(0, 0, 0, 0.22);
+    inset 1px 0 0 rgba(255, 244, 219, 0.08);
 }
 
 .hp-overview-item.is-enemy-turn {
   box-shadow:
-    inset 18px 0 30px -18px rgba(239, 68, 68, 0.5),
-    inset 0 10px 14px -14px rgba(0, 0, 0, 0.28),
-    inset 0 -12px 16px -16px rgba(0, 0, 0, 0.2);
-  animation: hostilePulse 1.8s ease-in-out infinite;
+    inset 1px 0 0 rgba(255, 232, 232, 0.12);
+}
+
+.hp-overview-item.is-enemy-turn::before {
+  opacity: 0.92;
+  background: linear-gradient(90deg, rgba(239, 68, 68, 0.64) 0%, rgba(239, 68, 68, 0.28) 18%, rgba(239, 68, 68, 0.08) 62%, rgba(239, 68, 68, 0) 100%);
+  animation: hostileGlow 1.8s ease-in-out infinite;
 }
 
 .hp-overview-item.is-player-turn {
   box-shadow:
-    inset 18px 0 30px -18px rgba(245, 199, 103, 0.5),
-    inset 0 10px 14px -14px rgba(0, 0, 0, 0.28),
-    inset 0 -12px 16px -16px rgba(0, 0, 0, 0.2);
-  animation: allyPulse 1.8s ease-in-out infinite;
+    inset 1px 0 0 rgba(255, 244, 219, 0.14);
+}
+
+.hp-overview-item.is-player-turn::before {
+  opacity: 0.92;
+  background: linear-gradient(90deg, rgba(245, 199, 103, 0.66) 0%, rgba(245, 199, 103, 0.28) 18%, rgba(245, 199, 103, 0.08) 62%, rgba(245, 199, 103, 0) 100%);
+  animation: allyGlow 1.8s ease-in-out infinite;
 }
 
 .item-meta {
@@ -594,33 +687,36 @@ function isRecord(value: unknown): value is Record<string, any> {
   padding: 20px 0;
 }
 
-@keyframes hostilePulse {
+@keyframes neutralGlow {
   0%, 100% {
-    box-shadow:
-      inset 18px 0 26px -18px rgba(239, 68, 68, 0.42),
-      inset 0 10px 14px -14px rgba(0, 0, 0, 0.28),
-      inset 0 -12px 16px -16px rgba(0, 0, 0, 0.2);
+    opacity: 0.6;
+    transform: scaleX(1);
   }
   50% {
-    box-shadow:
-      inset 22px 0 34px -18px rgba(239, 68, 68, 0.58),
-      inset 0 10px 14px -14px rgba(0, 0, 0, 0.28),
-      inset 0 -12px 16px -16px rgba(0, 0, 0, 0.2);
+    opacity: 0.72;
+    transform: scaleX(1.04);
   }
 }
 
-@keyframes allyPulse {
+@keyframes hostileGlow {
   0%, 100% {
-    box-shadow:
-      inset 18px 0 26px -18px rgba(245, 199, 103, 0.42),
-      inset 0 10px 14px -14px rgba(0, 0, 0, 0.28),
-      inset 0 -12px 16px -16px rgba(0, 0, 0, 0.2);
+    opacity: 0.82;
+    transform: scaleX(1);
   }
   50% {
-    box-shadow:
-      inset 22px 0 34px -18px rgba(245, 199, 103, 0.58),
-      inset 0 10px 14px -14px rgba(0, 0, 0, 0.28),
-      inset 0 -12px 16px -16px rgba(0, 0, 0, 0.2);
+    opacity: 1;
+    transform: scaleX(1.18);
+  }
+}
+
+@keyframes allyGlow {
+  0%, 100% {
+    opacity: 0.82;
+    transform: scaleX(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scaleX(1.18);
   }
 }
 

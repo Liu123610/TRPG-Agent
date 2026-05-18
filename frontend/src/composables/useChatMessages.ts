@@ -19,6 +19,15 @@ export const WELCOME_MESSAGE = '你好，我是奥秘之桌。你可以直接开
 
 const createWelcomeMessage = () => createMessage('assistant', WELCOME_MESSAGE)
 
+const HIDDEN_SYSTEM_MESSAGE_PREFIXES = [
+  '【探索状态移动请求】',
+  '【战斗状态移动请求】',
+  '【战术移动请求】',
+]
+
+// 中文注释：地图移动请求本质是发给后端的结构化指令，不应污染用户可见聊天历史。
+const isHiddenSystemMessage = (content: string) => HIDDEN_SYSTEM_MESSAGE_PREFIXES.some(prefix => content.startsWith(prefix))
+
 const normalizeCombatState = (state: any) => {
   if (!state || typeof state !== 'object') return null
 
@@ -185,12 +194,14 @@ export function useChatMessages(initialDebugMode: boolean = false) {
 
   const setMessages = (msgs: ChatMessage[]) => {
     stopLoading()  // 清除 loading
-    messages.value = msgs.map((msg) => ({
+    messages.value = msgs
+      .filter(msg => !isHiddenSystemMessage(msg.content))
+      .map((msg) => ({
       ...msg,
       id: msg.id || crypto.randomUUID(),
       timestamp: msg.timestamp ?? Date.now(),
       isHistory: true,
-    }))
+      }))
     currentStreamingMessageId = null
   }
 

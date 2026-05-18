@@ -6,6 +6,7 @@
       :space="space"
       :scene-units="sceneUnits"
       :selected-unit="selectedUnit"
+      :action-sheet-request-id="actionSheetRequestId"
       :send-combat-action-request="sendCombatActionRequest"
       :end-combat-turn-request="endCombatTurnRequest"
       @action-notice="handleActionNotice"
@@ -24,6 +25,7 @@ const props = defineProps<{
   space: Record<string, any> | null
   sceneUnits?: Record<string, any> | null
   selectedUnit: AvailabilitySelectionUnit | null
+  actionSheetRequestId?: number
   sendCombatActionRequest?: ((message: string) => Promise<void>) | null
   endCombatTurnRequest?: ((actorId: string) => Promise<void>) | null
   isCollapsed?: boolean
