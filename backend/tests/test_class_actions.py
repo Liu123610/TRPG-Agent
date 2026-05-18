@@ -11,6 +11,7 @@ if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
 from app.graph.state import CombatState
+from app.allies.profiles import get_ally_profile
 from app.services.tools.class_action_tools import use_class_action
 from app.services.tools import get_tool_profile, get_tools
 
@@ -102,6 +103,46 @@ def test_level_1_fighter_lists_second_wind_only():
     content = result.update["messages"][0].content
     assert "second_wind" in content
     assert "action_surge" not in content
+
+
+def test_opening_fighter_companion_is_named_grin_and_has_second_wind():
+    """开局战士友方应明确是格林，并复用职业动作框架获得回气。"""
+    ally = get_ally_profile("fighter_companion")
+    state = {"player": _fighter(), "scene_units": {"fighter_companion": ally}}
+
+    listed = use_class_action.func(
+        action_id="",
+        target_id="fighter_companion",
+        state=state,
+        tool_call_id="call-list",
+    )
+
+    assert ally["name"] == "格林"
+    assert "second_wind" in listed.update["messages"][0].content
+    assert "action_surge" not in listed.update["messages"][0].content
+
+
+def test_opening_fighter_companion_can_use_second_wind_from_scene_units():
+    """友方作为职业动作使用者时，应按场景单位写回自身资源和 HP。"""
+    ally = get_ally_profile("fighter_companion")
+    ally["hp"] = 5
+    state = {"player": _fighter(), "scene_units": {"fighter_companion": ally}}
+
+    with patch("app.services.class_actions.fighter.d20.roll") as roll:
+        roll.return_value.total = 4
+        roll.return_value.__str__ = lambda self: "1d10 (4)"
+        result = use_class_action.func(
+            action_id="second_wind",
+            target_id="fighter_companion",
+            state=state,
+            tool_call_id="call-use",
+        )
+
+    updated = result.update["scene_units"]["fighter_companion"]
+    assert updated["hp"] == 10
+    assert updated["resources"]["second_wind_uses"] == 0
+    assert result.update["hp_changes"][0]["old_hp"] == 5
+    assert result.update["hp_changes"][0]["new_hp"] == 10
 
 
 def test_level_2_fighter_lists_action_surge():

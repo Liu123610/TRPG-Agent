@@ -100,6 +100,27 @@ def test_goblin_actions_keep_existing_attack_behavior():
     assert result["combat"]["participants"]["goblin_1"]["action_available"] is False
 
 
+def test_goblin_nimble_escape_only_applies_disengage_by_default():
+    """Nimble Escape 可选择撤离或躲藏；未接入 Hide 检定前不能自动给 hidden。"""
+    from app.services.tools.monster_action_tools import use_monster_action
+
+    goblin = _unit("goblin_1", "Goblin", actions_slug="goblin")
+    target = _unit("target_1", "Target")
+    state = _state(goblin, [target])
+
+    result = _invoke_tool(
+        use_monster_action,
+        tool_input={"actor_id": "goblin_1", "action_id": "nimble_escape", "state": state},
+    ).update
+
+    conditions = result["combat"]["participants"]["goblin_1"]["conditions"]
+    condition_ids = {condition["id"] for condition in conditions}
+    assert "disengaged" in condition_ids
+    assert "hidden" not in condition_ids
+    assert result["combat"]["participants"]["goblin_1"]["bonus_action_available"] is False
+    assert "不会触发借机攻击" in result["messages"][0].content
+
+
 def test_lost_mine_wandering_monster_weapon_actions_are_structured():
     """随机遭遇里的常见武器攻击也应能走 use_monster_action。"""
     expected_actions = {

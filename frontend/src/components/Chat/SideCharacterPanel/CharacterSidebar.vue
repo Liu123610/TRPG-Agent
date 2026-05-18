@@ -15,6 +15,20 @@
         </button>
       </div>
 
+      <div v-if="viewTargets.length > 1" class="subject-switcher" aria-label="切换角色视角">
+        <button
+          v-for="target in viewTargets"
+          :key="target.id"
+          type="button"
+          class="subject-btn"
+          :class="{ active: target.id === activeSubjectId }"
+          :title="`切换到${target.name}`"
+          @click="selectSubject(target.id)"
+        >
+          {{ target.name }}
+        </button>
+      </div>
+
       <div ref="switcherRef" class="panel-switcher">
         <button
           class="view-toggle-btn"
@@ -56,18 +70,18 @@
 
       <CharacterPanel
         v-if="activePanel === 'character'"
-        :external-player="externalPlayer"
+        :external-player="displayedCharacter"
       />
       <InventoryPanel
         v-else
-        :external-player="externalPlayer"
+        :external-player="displayedCharacter"
       />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowLeftRight } from 'lucide-vue-next'
 import SpaceMap from '../SpaceMap.vue'
 import CharacterPanel from './CharacterPanel.vue'
@@ -84,6 +98,7 @@ const props = defineProps<{
   space?: any | null
   sceneUnits?: Record<string, any> | null
   deadUnits?: Record<string, any> | null
+  activeAllyId?: string
   sendTacticalMoveRequest?: ((message: string) => Promise<void>) | null
 }>()
 
@@ -103,11 +118,23 @@ const isMenuOpen = ref(false)
 const switcherRef = ref<HTMLElement | null>(null)
 const selectedUnit = ref<AvailabilitySelectionUnit | null>(null)
 const leftRailMode = ref<'navigation' | 'combat'>('navigation')
+const selectedSubjectId = ref('player')
 
 const activePanelTitle = computed(() => panelTitles[activePanel.value])
 const showLeftRailToggleButton = computed(() => isCombatActive(props.combat))
 const leftRailToggleLabel = computed(() => leftRailMode.value === 'combat' ? '返回导航' : '显示时间轴')
 const leftRailToggleTitle = computed(() => leftRailMode.value === 'combat' ? '切回默认导航栏' : '切回战斗时间轴')
+const viewTargets = computed(() => buildViewTargets(props.externalPlayer, props.combat, props.sceneUnits))
+const activeSubjectId = computed(() => {
+  if (viewTargets.value.some((target) => target.id === selectedSubjectId.value)) {
+    return selectedSubjectId.value
+  }
+  return 'player'
+})
+const displayedCharacter = computed(() => {
+  const target = viewTargets.value.find((item) => item.id === activeSubjectId.value)
+  return target?.character ?? props.externalPlayer
+})
 
 // 切换菜单改成显式选择，避免轮播式切换误触
 const toggleMenu = () => {
@@ -121,6 +148,10 @@ const setViewMode = (mode: SidebarPanelMode) => {
 
 const selectPanel = (mode: SidebarPanelMode) => {
   setViewMode(mode)
+}
+
+const selectSubject = (subjectId: string) => {
+  selectedSubjectId.value = subjectId
 }
 
 // 侧栏继续做轻量转发层，避免聊天页直接依赖地图组件。
@@ -137,6 +168,28 @@ const handleLeftRailMode = (event: Event) => {
   const mode = (event as CustomEvent<'navigation' | 'combat'>).detail
   leftRailMode.value = mode
 }
+
+watch(
+  () => props.activeAllyId,
+  (allyId) => {
+    if (!allyId) return
+    if (viewTargets.value.some((target) => target.id === allyId)) {
+      selectedSubjectId.value = allyId
+      activePanel.value = 'character'
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  viewTargets,
+  (targets) => {
+    if (!targets.some((target) => target.id === selectedSubjectId.value)) {
+      selectedSubjectId.value = 'player'
+    }
+  },
+  { immediate: true },
+)
 
 // 点击外部区域时关闭浮层，保持轻量原生感
 const handleDocumentClick = (event: MouseEvent) => {
@@ -158,12 +211,100 @@ onBeforeUnmount(() => {
 defineExpose({
   setViewMode,
   selectPanel,
+  selectSubject,
 })
 
 function isCombatActive(combat: unknown): boolean {
   if (!combat || typeof combat !== 'object') return false
   const participants = (combat as Record<string, any>).participants
   return !!(participants && typeof participants === 'object' && Object.keys(participants).length > 0)
+}
+
+type ViewTarget = {
+  id: string
+  name: string
+  character: PlayerState
+}
+
+function buildViewTargets(
+  player: PlayerState | null,
+  combat: any | null | undefined,
+  sceneUnits: Record<string, any> | null | undefined,
+): ViewTarget[] {
+  const targets: ViewTarget[] = []
+  if (player) {
+    targets.push({ id: 'player', name: player.name?.trim() || '玩家', character: player })
+  }
+
+  const allies = new Map<string, Record<string, any>>()
+  collectAllies(allies, combat?.participants)
+  collectAllies(allies, sceneUnits)
+  allies.forEach((unit, unitId) => {
+    targets.push({
+      id: unitId,
+      name: normalizeText(unit.name) || unitId,
+      character: normalizeAllyCharacter(unit, unitId),
+    })
+  })
+  return targets
+}
+
+function collectAllies(target: Map<string, Record<string, any>>, source: unknown): void {
+  if (!source || typeof source !== 'object') return
+  Object.entries(source as Record<string, any>).forEach(([key, value]) => {
+    if (!value || typeof value !== 'object') return
+    const unit = value as Record<string, any>
+    if (normalizeText(unit.side) !== 'ally') return
+    const id = normalizeText(unit.id) || key
+    target.set(id, { ...unit, id })
+  })
+}
+
+function normalizeAllyCharacter(unit: Record<string, any>, fallbackId: string): PlayerState {
+  // 中文注释：队友沿用角色面板，不把友方状态强行塞进玩家对象。
+  return {
+    id: normalizeText(unit.id) || fallbackId,
+    name: normalizeText(unit.name) || fallbackId,
+    role_class: normalizeText(unit.role_class) || '队友',
+    level: toNumber(unit.level) || 1,
+    hp: toNumber(unit.hp),
+    max_hp: Math.max(1, toNumber(unit.max_hp)),
+    temp_hp: toNumber(unit.temp_hp),
+    ac: toNumber(unit.ac) || toNumber(unit.base_ac) || 10,
+    base_ac: toNumber(unit.base_ac) || undefined,
+    abilities: isRecord(unit.abilities) ? unit.abilities as Record<string, number> : {},
+    modifiers: isRecord(unit.modifiers) ? unit.modifiers as Record<string, number> : {},
+    conditions: Array.isArray(unit.conditions) ? unit.conditions : [],
+    resources: isRecord(unit.resources) ? unit.resources as Record<string, number> : {},
+    weapons: Array.isArray(unit.weapons) ? unit.weapons : [],
+    coins: isRecord(unit.coins) ? unit.coins as Record<string, number> : undefined,
+    inventory: Array.isArray(unit.inventory) ? unit.inventory : [],
+    known_spells: Array.isArray(unit.known_spells) ? unit.known_spells : [],
+    known_cantrips: Array.isArray(unit.known_cantrips) ? unit.known_cantrips : [],
+    spellcasting_ability: normalizeText(unit.spellcasting_ability),
+    concentrating_on: typeof unit.concentrating_on === 'string' ? unit.concentrating_on : null,
+    xp: typeof unit.xp === 'number' ? unit.xp : undefined,
+    class_features: Array.isArray(unit.class_features) || isRecord(unit.class_features) ? unit.class_features : [],
+    arcane_tradition: normalizeText(unit.arcane_tradition) || undefined,
+    speed: toNumber(unit.speed) || undefined,
+    movement_left: toNumber(unit.movement_left),
+    action_available: unit.action_available !== false,
+    extra_action_available: unit.extra_action_available === true,
+    bonus_action_available: unit.bonus_action_available !== false,
+    reaction_available: unit.reaction_available !== false,
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function normalizeText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function toNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 </script>
 
@@ -218,6 +359,41 @@ function isCombatActive(combat: unknown): boolean {
 .left-rail-toggle-btn:hover {
   background: rgba(201, 168, 123, 0.14);
   border-color: rgba(201, 168, 123, 0.34);
+}
+
+.subject-switcher {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 210px;
+  justify-content: flex-end;
+}
+
+.subject-btn {
+  min-height: 28px;
+  max-width: 96px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 12px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: all 0.18s ease;
+}
+
+.subject-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f2e7d2;
+}
+
+.subject-btn.active {
+  border-color: rgba(201, 168, 123, 0.36);
+  background: rgba(201, 168, 123, 0.14);
+  color: #efd9ad;
 }
 
 .panel-switcher {

@@ -76,13 +76,15 @@ class ContextAssemblerTests(unittest.TestCase):
 
         self.assertIn("[开局友方准则]", assembled.runtime_state_text)
         self.assertIn("fighter_companion", assembled.runtime_state_text)
+        self.assertIn("格林", assembled.runtime_state_text)
+        self.assertIn("不是修达", assembled.runtime_state_text)
 
     def test_opening_prompt_skips_when_ally_exists(self):
         assembler = ContextAssembler()
         state = {
             "messages": [HumanMessage(content="开始冒险。")],
             "player": {"id": "player_hero", "name": "英雄", "side": "player"},
-            "scene_units": {"fighter_companion": {"id": "fighter_companion", "name": "米拉", "side": "ally"}},
+            "scene_units": {"fighter_companion": {"id": "fighter_companion", "name": "格林", "side": "ally"}},
         }
 
         assembled = assembler.assemble(state, NARRATIVE_AGENT_MODE, base_system_prompt="基础规则")
@@ -197,7 +199,7 @@ class ContextAssemblerTests(unittest.TestCase):
             "scene_units": {
                 "fighter_companion": {
                     "id": "fighter_companion",
-                    "name": "米拉",
+                    "name": "格林",
                     "side": "ally",
                     "hp": 12,
                     "max_hp": 12,

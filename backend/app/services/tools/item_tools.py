@@ -145,6 +145,15 @@ def _combat_action_type(mode: UseItemMode, actor_id: str, target_id: str) -> str
     return "action"
 
 
+def _validate_item_mode(mode: UseItemMode, actor_id: str, target_id: str) -> str | None:
+    """药水模式必须表达真实动作，避免“喝药”被误用成远程治疗他人。"""
+    if mode == "drink" and actor_id != target_id:
+        return "drink 只能由使用者自己饮用；给别人用药请显式使用 feed（5 尺）或 throw（20 尺）。"
+    if mode in {"feed", "throw"} and actor_id == target_id:
+        return "给自己使用药水请使用 drink，不要用 feed 或 throw。"
+    return None
+
+
 def _validate_item_range(mode: UseItemMode, state: dict, actor_id: str, target_id: str) -> str | None:
     """喂药必须贴身，投掷药水保留轻量 20 尺限制。"""
     if actor_id == target_id:
@@ -196,11 +205,22 @@ def _apply_potion(item_id: str, target: dict, lines: list[str], hp_changes: list
             lines.append(f"清除状态: {', '.join(removed)}。")
 
 
+def _use_item_intro(mode: UseItemMode, actor: dict, actor_id: str, target: dict, target_id: str, item_name: str) -> str:
+    """战报首行直接说明喝、喂、投掷，避免玩家误读动作和距离。"""
+    actor_name = actor.get("name", actor_id)
+    target_name = target.get("name", target_id)
+    if mode == "drink":
+        return f"{actor_name} 饮下 {item_name}。"
+    if mode == "feed":
+        return f"{actor_name} 贴身给 {target_name} 喂下 {item_name}。"
+    return f"{actor_name} 将 {item_name} 投掷给 {target_name}。"
+
+
 @tool
 def use_item(
     item_id: str,
-    target_id: str = "player",
     actor_id: str = "player",
+    target_id: str = "",
     mode: UseItemMode = "drink",
     *,
     state: Annotated[dict, InjectedState] = None,
@@ -208,18 +228,25 @@ def use_item(
 ) -> Command:
     """使用背包里的基础药水。
     当前支持 potion_of_healing、potion_of_greater_healing、potion_of_invisibility、potion_of_vitality。
-    2024 规则：自己喝药消耗附赠动作；喂给队友或投掷给队友消耗动作。喂药 5 尺，投掷药水 20 尺。
+    drink 只允许使用者自己饮用；省略 target_id 时目标就是 actor_id。
+    给别人用药必须显式使用 feed 或 throw：feed 为 5 尺贴身喂药，throw 为 20 尺投掷药水；二者都消耗动作。
+    2024 规则：自己喝药消耗附赠动作。
     """
     if item_id not in CONSUMABLE_ITEMS:
         return Command(update={"messages": [ToolMessage(content=f"暂不支持的道具: {item_id}。", tool_call_id=tool_call_id)]})
 
     ctx = _item_context(state)
     actor, resolved_actor_id, actor_source = _locate_unit(ctx, actor_id)
-    target, resolved_target_id, target_source = _locate_unit(ctx, target_id)
     if not actor:
         return Command(update={"messages": [ToolMessage(content=f"找不到道具使用者 '{actor_id}'。", tool_call_id=tool_call_id)]})
+
+    effective_target_id = str(target_id or "").strip() or resolved_actor_id
+    target, resolved_target_id, target_source = _locate_unit(ctx, effective_target_id)
     if not target:
-        return Command(update={"messages": [ToolMessage(content=f"找不到道具目标 '{target_id}'。", tool_call_id=tool_call_id)]})
+        return Command(update={"messages": [ToolMessage(content=f"找不到道具目标 '{effective_target_id}'。", tool_call_id=tool_call_id)]})
+
+    if mode_error := _validate_item_mode(mode, resolved_actor_id, resolved_target_id):
+        return Command(update={"messages": [ToolMessage(content=mode_error, tool_call_id=tool_call_id)]})
 
     item = _find_inventory_item(actor, item_id)
     if not item:
@@ -238,7 +265,7 @@ def use_item(
         consume_action_resource(actor, action_type)
 
     item_def = get_consumable_item(item_id)
-    lines = [f"{actor.get('name', resolved_actor_id)} 使用 {item_def.name} -> {target.get('name', resolved_target_id)}。"]
+    lines = [_use_item_intro(mode, actor, resolved_actor_id, target, resolved_target_id, item_def.name)]
     hp_changes: list[dict] = []
     _apply_potion(item_id, target, lines, hp_changes)
     _consume_inventory_item(actor, item)

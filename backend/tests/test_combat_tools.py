@@ -17,7 +17,7 @@ if str(backend_dir) not in sys.path:
 from app.graph.state import AttackInfo, CombatantState, CombatState, WeaponData
 from app.calculation.predefined_characters import PREDEFINED_CHARACTERS
 from app.conditions._base import build_condition_extra, create_condition
-from app.services.tools._helpers import prepare_player_for_combat
+from app.services.tools._helpers import prepare_character_for_combat, prepare_player_for_combat
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
@@ -144,6 +144,18 @@ class TestBuildPlayerCombatant:
         assert shortbow["damage_dice"] == "1d6+3"
         assert shortbow["normal_range_feet"] == 80
         assert shortbow["long_range_feet"] == 320
+
+    def test_light_crossbow_uses_registry_range(self):
+        """轻弩是开局友方常用远程武器，必须从武器表继承 80/320 尺射程。"""
+        from app.allies.profiles import get_ally_profile
+
+        ally = prepare_character_for_combat(get_ally_profile("fighter_companion"), side="ally")
+
+        light_crossbow = next(a for a in ally["attacks"] if a["name"] == "Light Crossbow")
+        assert light_crossbow["attack_bonus"] == 3
+        assert light_crossbow["damage_dice"] == "1d8+1"
+        assert light_crossbow["normal_range_feet"] == 80
+        assert light_crossbow["long_range_feet"] == 320
 
     def test_thrown_weapon_uses_strength_and_range_from_registry(self):
         """标枪按近战投掷武器处理：STR 攻击/伤害，同时带 30/120 尺射程。"""
@@ -544,6 +556,29 @@ class TestStartCombatPlayerJoin:
         assert "goblin_1" in result.update["messages"][0].content
         assert "尚未放置" in result.update["messages"][0].content
         assert "combat" not in result.update
+
+    def test_prepare_combat_start_submits_workflow_plan(self):
+        """LLM 只提交入场与突袭裁量，正式先攻交给 workflow 节点。"""
+        from app.services.tools.combat_tools import prepare_combat_start
+
+        result = _invoke_tool(
+            prepare_combat_start,
+            tool_input={
+                "combatant_ids": ["goblin_1"],
+                "surprised_ids": ["player"],
+                "map_plan": {"action": "create", "name": "伏击路段", "width": 150, "height": 120},
+                "placements": [{"unit_id": "player", "x": 20, "y": 60}, {"unit_id": "goblin_1", "x": 70, "y": 40}],
+                "reason": "地精藏在灌木中，玩家被伏击。",
+            },
+        )
+
+        assert result.update["pending_combat_start"]["combatant_ids"] == ["goblin_1"]
+        assert result.update["pending_combat_start"]["surprised_ids"] == ["player"]
+        assert result.update["pending_combat_start"]["map_plan"]["name"] == "伏击路段"
+        assert len(result.update["pending_combat_start"]["placements"]) == 2
+        assert "开战计划" in result.update["messages"][0].content
+        assert "落点数量: 2" in result.update["messages"][0].content
+        assert result.update["messages"][0].additional_kwargs["hidden_from_ui"] is True
 
 
 class TestAllySystem:
@@ -1237,6 +1272,34 @@ class TestAttackActionValidation:
         assert "射程不足" not in result.update["messages"][0].content
         assert result.update["player"]["action_available"] is False
 
+    def test_ally_light_crossbow_allowed_within_normal_range(self):
+        """友方轻弩攻击应按 80 尺普通射程校验，不能退化成 5 尺触及。"""
+        from app.allies.profiles import get_ally_profile
+
+        ally = prepare_character_for_combat(get_ally_profile("fighter_companion"), side="ally")
+        goblin = _make_goblin()
+        combat = _make_combat_state(
+            {"fighter_companion": ally, "goblin_1": goblin},
+            current_actor_id="fighter_companion",
+        )
+        state = {
+            "combat": combat,
+            "scene_units": {"fighter_companion": ally, "goblin_1": goblin},
+            "space": {
+                "active_map_id": "map_1",
+                "maps": {"map_1": {"id": "map_1", "name": "林道", "width": 200, "height": 100}},
+                "placements": {
+                    "fighter_companion": {"unit_id": "fighter_companion", "map_id": "map_1", "position": {"x": 0, "y": 0}},
+                    "goblin_1": {"unit_id": "goblin_1", "map_id": "map_1", "position": {"x": 60, "y": 0}},
+                },
+            },
+        }
+
+        result = self._invoke_attack(state, "fighter_companion", "goblin_1", attack_name="Light Crossbow")
+
+        assert "距离不足" not in result.update["messages"][0].content
+        assert result.update["combat"]["participants"]["fighter_companion"]["action_available"] is False
+
     def test_attack_rejected_when_space_exists_but_target_not_placed(self):
         """有地图时必须让参战单位拥有明确落点，避免距离规则被绕过。"""
         state = self._build_state(current_actor_id="goblin_1")
@@ -1469,6 +1532,7 @@ class TestWeaponDataModel:
             "Morningstar",
             "Scimitar",
             "Shortsword",
+            "Light Crossbow",
             "Heavy Crossbow",
             "Longbow",
             "Talon",

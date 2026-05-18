@@ -946,8 +946,8 @@ def test_runtime_does_not_warn_for_system_authorized_opening_companion():
             AdventureProgressDecision(
                 desync_detected=True,
                 unsupported_claims=[
-                    "玩家有一位名叫艾琳铁盾的同行战士伙伴",
-                    "玩家在无冬城冒险者公会结识了艾琳铁盾，甘德伦的信件也寄给了她",
+                    "玩家有一位名叫格林的同行战士伙伴",
+                    "玩家在出发前结识了格林，甘德伦的信件也寄给了他",
                 ],
                 warning="不要引入未支持 NPC。",
                 reason="开局同行战士由系统授权。",
@@ -957,6 +957,38 @@ def test_runtime_does_not_warn_for_system_authorized_opening_companion():
 
     assert update.applied == ""
     assert update.state_update == {}
+
+
+def test_runtime_keeps_warning_when_opening_companion_is_mixed_with_sildar():
+    state = {
+        "player": {"name": "温良"},
+        "adventure": {
+            "module_id": "lost_mine",
+            "active_node_id": "adventure_hook_meet_me_in_phandalin",
+            "unlocked_node_ids": ["adventure_hook_meet_me_in_phandalin"],
+            "completed_node_ids": [],
+            "known_clue_ids": [],
+            "completed_event_ids": [],
+            "pending_exit_option_ids": [],
+        },
+    }
+
+    update = adjudicate_and_apply_adventure_progress(
+        state,
+        recent_messages=[],
+        director=FakeDirector(
+            AdventureProgressDecision(
+                desync_detected=True,
+                unsupported_claims=["修达作为开局友方战士同伴和玩家一起出发"],
+                warning="不要混淆格林和修达。",
+                reason="开局同伴被混同为剧情 NPC。",
+            )
+        ),
+    )
+
+    assert update.state_update["adventure_guardrail_warning"]["unsupported_claims"] == [
+        "修达作为开局友方战士同伴和玩家一起出发"
+    ]
 
 
 def test_runtime_filters_known_module_alias_claims_but_keeps_state_leaps():

@@ -320,8 +320,9 @@ class ContextAssembler:
         if mode == NARRATIVE_AGENT_MODE and needs_opening_fighter_companion(state):
             sections.append(
                 "[开局友方准则]\n"
-                "当前玩家已加载但尚无友方单位。应在合理的开局叙事中主动创建一名战士友方，"
-                "使用友方创建能力生成 fighter_companion；创建后再继续推进冒险。"
+                "当前玩家已加载但尚无友方单位。应在合理的开局叙事中主动创建一名名为格林的战士友方，"
+                "使用友方创建能力生成 fighter_companion；格林可靠沉稳，是玩家的开局同行队友，不是修达·霍温特。"
+                "创建后再继续推进冒险。"
             )
 
         runtime_directive = self._build_adventure_runtime_directive(state, mode)
@@ -597,6 +598,14 @@ class ContextAssembler:
         else:
             lines.append("空间: 未建图；若叙事涉及位置、距离、范围、入场或移动，先建立或切换地图。")
 
+        if state_value_to_dict(state.get("pending_combat_start")):
+            lines.append("开战计划已提交；等待工作流统一校验并投先攻，不要重复提交。")
+        else:
+            lines.append(
+                "开战边界: 如果敌人或玩家即将实际攻击、伏击暴露或双方需要先攻/位置/回合，先生成所需单位并提交开战计划；"
+                "由你决定入场怪物/友方数量、地图方案、初始落点和突袭对象，建图、摆位与先攻由工作流结算。"
+            )
+
         lines.append("需要完整角色、单位、坐标或地图时以对应工具结果为准；节点事实已由当前节点上下文注入，不要沿用旧 HUD。")
         return "[探索状态]\n" + "\n".join(lines)
 
@@ -626,7 +635,7 @@ class ContextAssembler:
             if side_line:
                 lines.append(f"{label}: {side_line}")
 
-        lines.append("若需要完整动作、坐标、距离或状态详情，调用 inspect_unit/manage_space；不要从旧战报推断。")
+        lines.append("若需要完整单位详情调用 inspect_unit；坐标与移动由玩家可控回合或执行器处理，不要从旧战报推断。")
         return "[战斗状态]\n" + "\n".join(lines)
 
     def _build_combat_turn_directive(self, state: GraphState) -> str:
@@ -684,21 +693,27 @@ class ContextAssembler:
                     "再用 modify_character_state(action=\"record_death_save\", target_id=该友方ID, payload={\"roll_total\": 掷骰raw_roll}) 写回结果；"
                     "不要执行攻击、施法或主动移动。"
                 )
+            control_mode = str(current_actor.get("control_mode") or current_actor.get("controlled_by") or "").lower()
+            if current_actor.get("autopilot") or current_actor.get("llm_controlled") or control_mode in {"ai", "llm", "agent"}:
+                return (
+                    f"当前是 AI 托管友方单位 {current_name} [ID:{current_id}] 的回合。"
+                    f"行为倾向: {format_behavior_profile(current_actor)}。"
+                    f"资源: {format_resources(current_actor)}；法术: {format_magic(current_actor)}；反应: {format_reaction_status(current_actor)}。"
+                    "先决定本回合战术意图，再委托战斗执行器代为完成移动、攻击、施法、职业动作或物品使用；"
+                    "执行器回传建议结束回合时，再推进到下一个行动者。"
+                )
             return (
-                f"当前是友方单位 {current_name} [ID:{current_id}] 的回合，由你根据战场事实控制。"
-                f"行为倾向: {format_behavior_profile(current_actor)}。"
-                f"资源: {format_resources(current_actor)}；法术: {format_magic(current_actor)}；反应: {format_reaction_status(current_actor)}。"
-                "选择武器、法术、移动或其他能力时，以该友方单位 ID 作为行动者/施法者，而不是玩家；"
-                "当你判断该单位本回合可做且应做的事情都完成后，结束当前行动者回合。"
+                f"当前是友方单位 {current_name} [ID:{current_id}] 的回合。"
+                "该友方默认由玩家指导或接管；根据玩家最新意图处理动作。"
+                "若调用动作或施法能力，必须以该友方单位 ID 作为行动者/施法者，而不是玩家；"
+                "若前端已经结束回合则尊重流程帧。"
             )
 
         return (
             f"当前是怪物/NPC {current_name} [ID:{current_id}] 的回合。"
-            "你必须立刻为其选择一个可执行动作并调用工具，不要等待用户继续发话；"
-            "若需要接近目标，优先调用 manage_space(action=\"approach_unit\") 一步靠近到合适距离，"
-            "不要反复测距或手算坐标；"
-            "不要只用文字宣告换人；当你判断该单位本回合可做且应做的事情都完成后，"
-            "必须调用 next_turn 结束当前行动者回合。"
+            "你必须立刻决定战术意图并委托战斗执行器，不要等待用户继续发话；"
+            "不要直接手算移动、命中、伤害或用文字宣告换人。"
+            "执行器回传建议结束回合时，再推进到下一个行动者。"
         )
 
     def _build_adventure_node_anchor(self, state: GraphState, mode: str) -> str:
@@ -918,8 +933,11 @@ def repair_tool_call_sequence(messages: list[BaseMessage]) -> list[BaseMessage]:
         if isinstance(message, AIMessage) and message.tool_calls:
             tool_messages = collect_following_tool_messages(messages, index + 1)
             if tool_messages_cover_calls(message, tool_messages):
+                expected_count = len(message.tool_calls)
                 repaired.append(message)
-                repaired.extend(tool_messages)
+                repaired.extend(tool_messages[:expected_count])
+                for extra_tool_message in tool_messages[expected_count:]:
+                    repaired.append(HumanMessage(content=message_content_to_text(extra_tool_message.content)))
                 index += 1 + len(tool_messages)
                 continue
 

@@ -146,6 +146,44 @@ class PendingReactionState(BaseModel, extra="allow"):
     available_reactions: list[ReactionOptionState] = Field(default_factory=list)
 
 
+class PendingCombatStartState(BaseModel, extra="allow"):
+    """LLM 提交遭遇布置裁量，正式建图、摆位和开战由图节点统一执行。"""
+    combatant_ids: list[str] = Field(default_factory=list)
+    surprised_ids: list[str] = Field(default_factory=list)
+    map_plan: dict[str, Any] | None = None
+    placements: list[dict[str, Any]] = Field(default_factory=list)
+    reason: str = ""
+
+
+class PendingCombatExecutorState(BaseModel, extra="allow"):
+    """主 Agent 委托执行器处理当前单位回合的结构化指令。"""
+    actor_id: str
+    instruction: str
+
+
+class PendingCombatEndState(BaseModel, extra="allow"):
+    """LLM 提交战斗收束裁定；单位结局与 XP 资格由 workflow 统一翻译。"""
+    outcomes: list[dict[str, Any]] = Field(default_factory=list)
+    reason: str = ""
+
+
+class CombatExecutorResultState(BaseModel, extra="allow"):
+    """执行器回传给主 Agent 的战斗执行摘要。"""
+    actor_id: str = ""
+    status: Literal["completed", "partial", "blocked", "reaction_pending", "no_viable_action", "needs_main_agent_decision"] = "completed"
+    turn_should_end: bool = False
+    needs_main_agent_decision: bool = False
+    blocked_reason: str | None = None
+    pending_reaction: bool = False
+    resource_state: dict[str, Any] = Field(default_factory=dict)
+    used_resources: list[str] = Field(default_factory=list)
+    remaining_meaningful_options: list[str] = Field(default_factory=list)
+    recommended_next: dict[str, Any] = Field(default_factory=dict)
+    tool_trace: list[dict[str, Any]] = Field(default_factory=list)
+    decision_note: str = ""
+    narration_hint: str = ""
+
+
 class AttackInfo(BaseModel):
     """从怪物/角色动作列表中提取的单次攻击信息"""
     name: str
@@ -308,6 +346,11 @@ class GraphState(TypedDict, total=False):
     last_roll: Optional[RollResultState]
     pending_reaction: Optional[PendingReactionState]
     reaction_choice: Optional[ReactionChoiceState]
+    pending_combat_start: Optional[PendingCombatStartState]
+    pending_combat_end: Optional[PendingCombatEndState]
+    pending_combat_executor: Optional[PendingCombatExecutorState]
+    combat_executor_result: Optional[CombatExecutorResultState]
+    combat_events: list[dict[str, Any]]
 
     # 场景单位池 — spawn 产出放这里，start_combat 从中挑选参战者
     scene_units: dict[str, CombatantState]

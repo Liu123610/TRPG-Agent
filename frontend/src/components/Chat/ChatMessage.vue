@@ -94,7 +94,7 @@ const diceRoll = computed(() => props.message.metadata?.dice_roll)
 const avatarUrl = computed(() => props.message.avatar ?? undefined)
 const displayName = computed(() => {
   if (props.message.displayName) return props.message.displayName
-  return props.message.role === 'user' ? '我' : 'TRPG 助手'
+  return props.message.role === 'user' ? '我' : '奥秘之桌'
 })
 const avatarIcon = computed(() => props.message.role === 'user' ? '👤' : '🤖')
 

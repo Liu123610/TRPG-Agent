@@ -8,18 +8,22 @@ from app.graph.constants import (
     ASSISTANT_NODE,
     COMBAT_AGENT_MODE,
     COMBAT_ASSISTANT_NODE,
+    COMBAT_END_NODE,
+    COMBAT_EXECUTOR_NODE,
+    COMBAT_START_NODE,
     COMBAT_RESOLUTION_NODE,
     DEATH_SAVE_PAUSE_NODE,
     END_NODE,
     NARRATIVE_AGENT_MODE,
     STATE_DEATH_SAVE_PAUSE_TURN_KEY,
 )
-from app.graph.edges import route_from_assistant, route_from_combat_resolution, route_from_reaction_resolution, route_from_router, route_from_tool
-from app.graph.nodes import combat_assistant_node, combat_resolution_node, death_save_pause_node
+from app.graph.edges import route_from_assistant, route_from_combat_end, route_from_combat_resolution, route_from_combat_start, route_from_reaction_resolution, route_from_router, route_from_tool
+from app.graph.nodes import combat_assistant_node, combat_end_node, combat_executor_node, combat_resolution_node, combat_start_node, death_save_pause_node
 from app.graph.state import GraphState
 from app.memory.context_assembler import ContextAssembler, trim_model_messages
 from app.prompts import get_assistant_system_prompt
 from app.services.tools import get_tool_profile
+from app.services.tools.combat_tools import delegate_combat_turn, prepare_combat_end
 from app.services.tools.character_tools import modify_character_state
 from app.services.tools.space_tools import manage_space
 
@@ -78,6 +82,16 @@ def _player_state() -> dict:
     }
 
 
+def _invoke_tool(tool_func, *, tool_input: dict) -> object:
+    tool_call = {
+        "name": tool_func.name,
+        "args": tool_input,
+        "id": "test-call-id",
+        "type": "tool_call",
+    }
+    return tool_func.invoke(tool_call)
+
+
 def test_router_sends_player_turn_combat_to_combat_assistant():
     state = {
         "phase": "combat",
@@ -100,6 +114,76 @@ def test_router_sends_monster_turn_combat_to_combat_assistant():
     assert route_from_router(state) == COMBAT_ASSISTANT_NODE
 
 
+def test_router_prioritizes_pending_combat_start_workflow():
+    state = {
+        "messages": [HumanMessage(content="进入战斗")],
+        "pending_combat_start": {"combatant_ids": ["goblin_1"], "surprised_ids": ["player"]},
+    }
+
+    assert route_from_router(state) == COMBAT_START_NODE
+
+
+def test_tool_route_executes_pending_combat_start_before_assistant():
+    state = {
+        "messages": [ToolMessage(content="计划已提交", tool_call_id="call_1")],
+        "pending_combat_start": {"combatant_ids": ["goblin_1"], "surprised_ids": []},
+    }
+
+    assert route_from_tool(state) == COMBAT_START_NODE
+
+
+def test_router_prioritizes_pending_combat_executor_workflow():
+    state = {
+        "phase": "combat",
+        "combat": _combat_state("goblin_1"),
+        "player": _player_state(),
+        "messages": [ToolMessage(content="已委托", tool_call_id="call_1")],
+        "pending_combat_executor": {"actor_id": "goblin_1", "instruction": "攻击玩家"},
+    }
+
+    assert route_from_router(state) == COMBAT_EXECUTOR_NODE
+    assert route_from_tool(state) == COMBAT_EXECUTOR_NODE
+
+
+def test_router_prioritizes_pending_combat_end_workflow():
+    state = {
+        "phase": "combat",
+        "combat": _combat_state("goblin_1"),
+        "player": _player_state(),
+        "messages": [ToolMessage(content="已提交结束计划", tool_call_id="call_1")],
+        "pending_combat_end": {"outcomes": [{"unit_id": "goblin_1", "result": "captured"}]},
+    }
+
+    assert route_from_router(state) == COMBAT_END_NODE
+    assert route_from_tool(state) == COMBAT_END_NODE
+
+
+def test_delegate_combat_turn_writes_pending_executor_request():
+    result = _invoke_tool(
+        delegate_combat_turn,
+        tool_input={"actor_id": "goblin_1", "instruction": "靠近并攻击玩家。"},
+    )
+
+    assert result.update["pending_combat_executor"] == {
+        "actor_id": "goblin_1",
+        "instruction": "靠近并攻击玩家。",
+    }
+    assert result.update["messages"][0].additional_kwargs["hidden_from_ui"] is True
+
+
+def test_prepare_combat_end_writes_pending_workflow_request():
+    result = _invoke_tool(
+        prepare_combat_end,
+        tool_input={"outcomes": [{"unit_id": "goblin_1", "result": "captured"}], "reason": "地精投降。"},
+    )
+
+    assert result.update["pending_combat_end"] == {
+        "outcomes": [{"unit_id": "goblin_1", "result": "captured"}],
+        "reason": "地精投降。",
+    }
+    assert result.update["messages"][0].additional_kwargs["hidden_from_ui"] is True
+
+
 def test_tool_route_stops_on_pending_reaction():
     state = {
         "phase": "combat",
@@ -109,6 +193,25 @@ def test_tool_route_stops_on_pending_reaction():
     }
 
     assert route_from_tool(state) == END_NODE
+
+
+def test_combat_start_route_returns_combat_assistant_after_success():
+    state = {
+        "phase": "combat",
+        "combat": _combat_state("goblin_1"),
+        "player": _player_state(),
+    }
+
+    assert route_from_combat_start(state) == COMBAT_ASSISTANT_NODE
+
+
+def test_combat_end_route_returns_narrative_assistant_after_success():
+    state = {
+        "phase": "exploration",
+        "combat": None,
+    }
+
+    assert route_from_combat_end(state) == ASSISTANT_NODE
 
 
 def test_combat_resolution_route_returns_combat_assistant_for_player_turn():
@@ -325,6 +428,144 @@ def test_reaction_resolution_moves_into_resolution_node_when_combat_continues():
     assert route_from_reaction_resolution(state) == COMBAT_RESOLUTION_NODE
 
 
+def test_combat_start_node_executes_pending_plan_with_surprise_reason():
+    player = _player_state()
+    goblin = _combat_state("goblin_1")["participants"]["goblin_1"]
+    state = {
+        "player": player,
+        "scene_units": {"goblin_1": goblin},
+        "space": {
+            "active_map_id": "map_1",
+            "maps": {"map_1": {"id": "map_1", "name": "战斗地图", "width": 100, "height": 100, "grid_size": 5}},
+            "placements": {
+                "player_hero": {"unit_id": "player_hero", "map_id": "map_1", "position": {"x": 0, "y": 0}},
+                "goblin_1": {"unit_id": "goblin_1", "map_id": "map_1", "position": {"x": 20, "y": 0}},
+            },
+        },
+        "pending_combat_start": {
+            "combatant_ids": ["goblin_1"],
+            "surprised_ids": ["player"],
+            "reason": "地精伏击成功，玩家先攻劣势。",
+        },
+    }
+
+    result = combat_start_node(state)
+
+    assert result["pending_combat_start"] is None
+    assert result["phase"] == "combat"
+    assert "goblin_1" in result["combat"]["participants"]
+    assert result["player"]["surprised"] is True
+    assert "开战裁定：地精伏击成功" in result["messages"][0].content
+    assert "战斗开始！第 1 回合" in result["messages"][0].content
+
+
+def test_combat_start_node_applies_llm_map_and_placements_before_initiative():
+    player = _player_state()
+    goblin = _combat_state("goblin_1")["participants"]["goblin_1"]
+    state = {
+        "player": player,
+        "scene_units": {"goblin_1": goblin},
+        "pending_combat_start": {
+            "combatant_ids": ["goblin_1"],
+            "surprised_ids": [],
+            "map_plan": {"action": "create", "map_id": "ambush_road", "name": "三猪小径伏击", "width": 150, "height": 120},
+            "placements": [
+                {"unit_id": "player", "x": 25, "y": 60},
+                {"unit_id": "goblin_1", "x": 80, "y": 45},
+            ],
+            "reason": "道路两侧灌木适合伏击。",
+        },
+    }
+
+    result = combat_start_node(state)
+
+    assert result["phase"] == "combat"
+    assert result["space"]["active_map_id"] == "ambush_road"
+    assert result["space"]["placements"]["player_hero"]["position"] == {"x": 25.0, "y": 60.0}
+    assert result["space"]["placements"]["goblin_1"]["position"] == {"x": 80.0, "y": 45.0}
+    assert result["combat"]["current_actor_id"] in {"player_hero", "goblin_1"}
+
+
+def test_combat_start_node_rejects_out_of_bounds_llm_placement():
+    player = _player_state()
+    goblin = _combat_state("goblin_1")["participants"]["goblin_1"]
+    state = {
+        "player": player,
+        "scene_units": {"goblin_1": goblin},
+        "pending_combat_start": {
+            "combatant_ids": ["goblin_1"],
+            "map_plan": {"action": "create", "map_id": "tight_room", "name": "狭窄石室", "width": 30, "height": 30},
+            "placements": [
+                {"unit_id": "player", "x": 10, "y": 10},
+                {"unit_id": "goblin_1", "x": 80, "y": 10},
+            ],
+        },
+    }
+
+    result = combat_start_node(state)
+
+    assert result["pending_combat_start"] is None
+    assert "超出地图" in result["messages"][0].content
+    assert "combat" not in result
+
+
+def test_combat_end_node_awards_xp_for_captured_enemy():
+    player = _player_state()
+    player["xp"] = 0
+    combat = _combat_state("goblin_1")
+    combat["participants"]["goblin_1"]["hp"] = 3
+    combat["participants"]["goblin_1"]["challenge_rating"] = "1/4"
+    state = {
+        "phase": "combat",
+        "player": player,
+        "combat": combat,
+        "scene_units": {"goblin_1": combat["participants"]["goblin_1"]},
+        "space": {
+            "active_map_id": "road",
+            "maps": {"road": {"id": "road", "name": "小路", "width": 60, "height": 40, "grid_size": 5}},
+            "placements": {
+                "goblin_1": {"unit_id": "goblin_1", "map_id": "road", "position": {"x": 10, "y": 10}},
+            },
+        },
+        "pending_combat_end": {
+            "outcomes": [{"unit_id": "goblin_1", "result": "captured"}],
+            "reason": "地精放下武器投降。",
+        },
+    }
+
+    result = combat_end_node(state)
+
+    assert result["pending_combat_end"] is None
+    assert result["phase"] == "exploration"
+    assert result["combat"] is None
+    assert result["player"]["xp"] == 50
+    assert result["departed_units"]["goblin_1"]["departure_reason"] == "defeated"
+    assert "goblin_1" not in result["space"]["placements"]
+    assert "战斗收束裁定：地精放下武器投降。" in result["messages"][0].content
+    assert "战斗 XP: +50" in result["messages"][0].content
+
+
+def test_combat_end_node_blocks_unclassified_living_enemy():
+    combat = _combat_state("goblin_1")
+    combat["participants"]["goblin_1"]["hp"] = 3
+    state = {
+        "phase": "combat",
+        "player": _player_state(),
+        "combat": combat,
+        "pending_combat_end": {
+            "outcomes": [],
+            "reason": "战斗结束。",
+        },
+    }
+
+    result = combat_end_node(state)
+
+    assert result["pending_combat_end"] is None
+    assert "仍存活的敌方单位缺少结局分类" in result["messages"][0].content
+    assert "captured/surrendered/subdued/defeated" in result["messages"][0].content
+    assert "combat" not in result
+
+
 def test_model_projection_summarizes_tool_messages_without_mutating_transcript():
     tool_message = ToolMessage(
         content="Goblin 使用 [Scimitar] 攻击 英雄!\n伤害骰: 1d6+2 → 5 点伤害\n英雄 HP: 18 → 13",
@@ -348,6 +589,47 @@ def test_model_projection_summarizes_tool_messages_without_mutating_transcript()
     assert isinstance(projected_messages[-2], AIMessage)
     assert projected_messages[-1].content.startswith("[工具:attack_action]")
     assert state["messages"][-1].content == tool_message.content
+
+
+def test_model_projection_keeps_direct_end_turn_flow_frame():
+    flow_message = HumanMessage(content=(
+        "[系统:前端结束回合]\n"
+        "player_hero 已通过前端按钮结束回合；后端已执行 next_turn。\n"
+        "next_turn: 第 1 回合 — 当前行动者：Goblin [ID: goblin_1] (HP: 7/7)"
+    ))
+    state = {
+        "phase": "combat",
+        "combat": _combat_state("goblin_1"),
+        "player": _player_state(),
+        "messages": [flow_message],
+    }
+
+    projected_messages = _build_model_input_messages(state, COMBAT_AGENT_MODE)
+
+    assert projected_messages[-1].content.startswith("[系统:前端结束回合]")
+    assert "next_turn: 第 1 回合" in projected_messages[-1].content
+
+
+def test_model_projection_keeps_workflow_combat_end_result_without_tool_prefix_breakage():
+    """workflow 直接写入的 ToolMessage 必须转成事实消息，不能留下悬空工具结果。"""
+    end_message = ToolMessage(
+        content="战斗收束裁定：地精投降。\n共进行了 2 回合。 存活: 英雄 离场: Goblin 战斗 XP: +50。",
+        tool_call_id="workflow-combat-end",
+        name="end_combat",
+    )
+    state = {
+        "phase": "exploration",
+        "combat": None,
+        "player": _player_state(),
+        "messages": [HumanMessage(content="我接受投降。"), end_message],
+    }
+
+    projected_messages = _build_model_input_messages(state, NARRATIVE_AGENT_MODE)
+
+    assert not any(isinstance(message, ToolMessage) for message in projected_messages)
+    assert isinstance(projected_messages[-1], HumanMessage)
+    assert "战斗收束裁定：地精投降" in projected_messages[-1].content
+    assert "战斗 XP: +50" in projected_messages[-1].content
 
 
 def test_combat_projection_keeps_full_history_under_large_context_budget():
@@ -510,11 +792,15 @@ def test_tool_profiles_split_exploration_and_combat_visibility():
     assert "manage_scene_units" in narrative_tools
     assert "manage_scene_units" in combat_tools
     assert "end_combat" not in narrative_tools
-    assert "end_combat" in combat_tools
+    assert "end_combat" not in combat_tools
+    assert "prepare_combat_end" not in narrative_tools
+    assert "prepare_combat_end" in combat_tools
+    assert "prepare_combat_start" in narrative_tools
+    assert "prepare_combat_start" not in combat_tools
     assert "spawn_ally" not in narrative_tools
     assert "spawn_monsters" not in narrative_tools
     assert "clear_dead_units" not in narrative_tools
-    assert "start_combat" in narrative_tools
+    assert "start_combat" not in narrative_tools
     assert "remove_unit" not in combat_tools
     assert "start_combat" not in combat_tools
     assert "take_rest" in narrative_tools
@@ -546,7 +832,7 @@ def test_tool_profiles_expose_only_current_recommended_entries_in_stable_order()
         "load_character_profile",
         "modify_character_state",
         "manage_scene_units",
-        "start_combat",
+        "prepare_combat_start",
         "cast_spell",
         "use_item",
         "buy_item",
@@ -563,10 +849,11 @@ def test_tool_profiles_expose_only_current_recommended_entries_in_stable_order()
         "use_class_action",
         "use_item",
         "attack_action",
+        "delegate_combat_turn",
+        "prepare_combat_end",
         "manage_scene_units",
         "use_monster_action",
         "next_turn",
-        "end_combat",
         "cast_spell",
         "inspect_unit",
         "consult_rules_handbook",
@@ -596,6 +883,10 @@ def test_compatibility_tools_are_toolnode_only_without_profile_duplicates():
     assert "choose_fighter_archetype" not in all_tool_names
     assert "switch_plane_map" not in all_tool_names
     assert "manage_adventure" in all_tool_names
+    assert "start_combat" in all_tool_names
+    assert "end_combat" in all_tool_names
+    assert "prepare_combat_start" in all_tool_names
+    assert "prepare_combat_end" in all_tool_names
     assert "claim_adventure_reward" in all_tool_names
     assert "buy_item" in all_tool_names
     assert "use_class_action" in all_tool_names
@@ -717,7 +1008,7 @@ def test_combat_brief_separates_ally_from_enemy_side():
     assert "spell_slot_lv1=1/3" in brief
     assert "shield" in brief
     assert "当前是友方单位 伊莲" in directive
-    assert "友方单位 ID" in directive
+    assert "玩家指导或接管" in directive
 
 
 def test_fallen_ally_turn_directive_requires_death_save():
@@ -763,8 +1054,8 @@ def test_combat_turn_directive_switches_between_monster_and_player_turns():
     player_directive = _build_combat_turn_directive(player_state)
 
     assert "怪物/NPC" in monster_directive
-    assert "可执行动作" in monster_directive
-    assert "approach_unit" in monster_directive
+    assert "委托战斗执行器" in monster_directive
+    assert "不要直接手算移动" in monster_directive
     assert "玩家单位" in player_directive
     assert "玩家最新意图" in player_directive
 
@@ -845,7 +1136,7 @@ def test_combat_assistant_node_invokes_llm_with_monster_turn_directive_and_comba
             })
             return AIMessage(
                 content="",
-                tool_calls=[{"name": "attack_action", "args": {"attacker_id": "goblin_1", "target_id": "player_hero"}, "id": "call_1"}],
+                tool_calls=[{"name": "delegate_combat_turn", "args": {"actor_id": "goblin_1", "instruction": "靠近并攻击玩家。"}, "id": "call_1"}],
             )
 
     fake_service = _FakeLLMService()
@@ -861,15 +1152,237 @@ def test_combat_assistant_node_invokes_llm_with_monster_turn_directive_and_comba
         result = combat_assistant_node(state)
 
     assert result["messages"][0].content.startswith("[系统:运行状态帧]")
-    assert result["messages"][1].tool_calls[0]["name"] == "attack_action"
+    assert result["messages"][1].tool_calls[0]["name"] == "delegate_combat_turn"
     llm_call = fake_service.calls[0]
     assert llm_call["mode"] == COMBAT_AGENT_MODE
-    assert {tool.name for tool in llm_call["tools"]} == {tool.name for tool in get_tool_profile("combat")}
+    assert {tool.name for tool in llm_call["tools"]} == {
+        "delegate_combat_turn",
+        "prepare_combat_end",
+        "next_turn",
+        "inspect_unit",
+        "consult_rules_handbook",
+    }
     runtime_state = llm_call["messages"][-1].content
     assert "当前是怪物/NPC Goblin [ID:goblin_1] 的回合" in runtime_state
     assert "不要等待用户继续发话" in runtime_state
+    assert "委托战斗执行器" in runtime_state
     assert "哥布林正试图拖走祭司" in runtime_state
     assert "start_combat" not in {tool.name for tool in llm_call["tools"]}
+    assert "attack_action" not in {tool.name for tool in llm_call["tools"]}
+    assert "manage_space" not in {tool.name for tool in llm_call["tools"]}
+
+
+def test_combat_assistant_keeps_action_tools_for_player_turn():
+    class _FakeLLMService:
+        def __init__(self):
+            self.calls = []
+
+        def invoke_with_tools(self, messages, tools, system_prompt, mode):
+            self.calls.append({
+                "messages": messages,
+                "tools": tools,
+                "system_prompt": system_prompt,
+                "mode": mode,
+            })
+            return AIMessage(content="你准备行动。")
+
+    fake_service = _FakeLLMService()
+    state = {
+        "phase": "combat",
+        "combat": _combat_state("player_hero"),
+        "player": _player_state(),
+        "messages": [HumanMessage(content="我攻击地精")],
+    }
+
+    with patch("app.graph.nodes._get_llm_service", return_value=fake_service):
+        combat_assistant_node(state)
+
+    tool_names = {tool.name for tool in fake_service.calls[0]["tools"]}
+    assert "attack_action" in tool_names
+    assert "cast_spell" in tool_names
+    assert "use_item" in tool_names
+    assert "manage_space" in tool_names
+
+
+def test_combat_assistant_narrows_tools_for_ai_controlled_ally_turn():
+    class _FakeLLMService:
+        def __init__(self):
+            self.calls = []
+
+        def invoke_with_tools(self, messages, tools, system_prompt, mode):
+            self.calls.append({
+                "messages": messages,
+                "tools": tools,
+                "system_prompt": system_prompt,
+                "mode": mode,
+            })
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": "delegate_combat_turn", "args": {"actor_id": "ally_1", "instruction": "保护玩家。"}, "id": "call_ally"}],
+            )
+
+    fake_service = _FakeLLMService()
+    combat = _combat_state("ally_1")
+    combat["initiative_order"] = ["player_hero", "ally_1", "goblin_1"]
+    combat["participants"]["ally_1"] = {
+        "id": "ally_1",
+        "name": "伊莲",
+        "side": "ally",
+        "hp": 8,
+        "max_hp": 8,
+        "ac": 12,
+        "control_mode": "ai",
+    }
+    state = {
+        "phase": "combat",
+        "combat": combat,
+        "player": _player_state(),
+        "messages": [HumanMessage(content="继续")],
+    }
+
+    with patch("app.graph.nodes._get_llm_service", return_value=fake_service):
+        combat_assistant_node(state)
+
+    tool_names = {tool.name for tool in fake_service.calls[0]["tools"]}
+    runtime_state = fake_service.calls[0]["messages"][-1].content
+    assert tool_names == {
+        "delegate_combat_turn",
+        "prepare_combat_end",
+        "next_turn",
+        "inspect_unit",
+        "consult_rules_handbook",
+    }
+    assert "AI 托管友方单位 伊莲" in runtime_state
+    assert "委托战斗执行器" in runtime_state
+
+
+def test_combat_executor_node_runs_delegated_tool_and_returns_trace():
+    class _FakeLLMService:
+        def __init__(self):
+            self.calls = []
+
+        def invoke_with_tools(self, messages, tools, system_prompt, mode):
+            self.calls.append({
+                "messages": messages,
+                "tools": tools,
+                "system_prompt": system_prompt,
+                "mode": mode,
+            })
+            if len(self.calls) == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "attack_action",
+                        "args": {"attacker_id": "goblin_1", "target_id": "player_hero"},
+                        "id": "executor-call-1",
+                    }],
+                )
+            assert isinstance(messages[-1], ToolMessage)
+            return AIMessage(content="已攻击玩家。", tool_calls=[])
+
+    fake_service = _FakeLLMService()
+    combat = _combat_state("goblin_1")
+    combat["participants"]["goblin_1"]["action_available"] = True
+    combat["participants"]["goblin_1"]["attacks"] = [{
+        "name": "Scimitar",
+        "attack_bonus": 4,
+        "damage_dice": "1d6+2",
+        "damage_type": "slashing",
+        "reach_feet": 5,
+    }]
+    state = {
+        "phase": "combat",
+        "combat": combat,
+        "player": _player_state(),
+        "space": {
+            "active_map_id": "road",
+            "maps": {"road": {"id": "road", "name": "小路", "width": 60, "height": 40, "grid_size": 5}},
+            "placements": {
+                "goblin_1": {"unit_id": "goblin_1", "map_id": "road", "position": {"x": 10, "y": 10}},
+                "player_hero": {"unit_id": "player_hero", "map_id": "road", "position": {"x": 15, "y": 10}},
+            },
+        },
+        "messages": [HumanMessage(content="继续")],
+        "pending_combat_executor": {"actor_id": "goblin_1", "instruction": "用弯刀攻击玩家。"},
+    }
+
+    with patch("app.graph.nodes._get_llm_service", return_value=fake_service):
+        result = combat_executor_node(state)
+
+    executor_result = result["combat_executor_result"]
+    assert executor_result["status"] == "completed"
+    assert executor_result["turn_should_end"] is True
+    assert executor_result["resource_state"]["action_available"] is False
+    assert executor_result["used_resources"] == ["action"]
+    assert executor_result["recommended_next"]["kind"] == "end_turn"
+    assert executor_result["tool_trace"][0]["tool"] == "attack_action"
+    assert result["pending_combat_executor"] is None
+    assert result["combat"]["participants"]["goblin_1"]["action_available"] is False
+    assert result["combat_events"][0]["attack_roll"]["raw_roll"] >= 1
+    assert "hp_changes" in result["combat_events"][0]
+    assert result["messages"][0].content.startswith("[系统:战斗执行器]")
+    assert fake_service.calls[0]["mode"] == COMBAT_AGENT_MODE
+    assert {tool.name for tool in fake_service.calls[0]["tools"]} == {
+        "manage_space",
+        "use_monster_action",
+        "attack_action",
+        "cast_spell",
+        "use_class_action",
+        "use_item",
+        "inspect_unit",
+    }
+
+
+def test_combat_executor_recommends_continue_when_primary_action_remains():
+    class _FakeLLMService:
+        def __init__(self):
+            self.calls = []
+
+        def invoke_with_tools(self, messages, tools, system_prompt, mode):
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "manage_space",
+                        "args": {
+                            "action": "move_unit",
+                            "payload": {"unit_id": "goblin_1", "x": 20, "y": 10},
+                        },
+                        "id": "executor-move",
+                    }],
+                )
+            return AIMessage(content="已移动到攻击位置，仍可攻击。", tool_calls=[])
+
+    combat = _combat_state("goblin_1")
+    combat["participants"]["goblin_1"]["action_available"] = True
+    combat["participants"]["goblin_1"]["movement_left"] = 30
+    state = {
+        "phase": "combat",
+        "combat": combat,
+        "player": _player_state(),
+        "space": {
+            "active_map_id": "road",
+            "maps": {"road": {"id": "road", "name": "小路", "width": 60, "height": 40, "grid_size": 5}},
+            "placements": {
+                "goblin_1": {"unit_id": "goblin_1", "map_id": "road", "position": {"x": 10, "y": 10}},
+                "player_hero": {"unit_id": "player_hero", "map_id": "road", "position": {"x": 25, "y": 10}},
+            },
+        },
+        "messages": [HumanMessage(content="继续")],
+        "pending_combat_executor": {"actor_id": "goblin_1", "instruction": "先靠近玩家。"},
+    }
+
+    with patch("app.graph.nodes._get_llm_service", return_value=_FakeLLMService()):
+        result = combat_executor_node(state)
+
+    executor_result = result["combat_executor_result"]
+    assert executor_result["turn_should_end"] is False
+    assert executor_result["needs_main_agent_decision"] is False
+    assert executor_result["resource_state"]["action_available"] is True
+    assert executor_result["used_resources"] == ["movement"]
+    assert executor_result["recommended_next"]["kind"] == "continue_executor"
+    assert "主要动作仍可用" in executor_result["remaining_meaningful_options"][0]
 
 
 def test_assistant_invocation_filters_stale_runtime_frames_but_appends_current_one():

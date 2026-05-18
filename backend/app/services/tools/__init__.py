@@ -15,9 +15,12 @@ from app.services.tools.character_tools import (
 )
 from app.services.tools.combat_tools import (
     attack_action,
+    delegate_combat_turn,
     end_combat,
     manage_scene_units,
     next_turn,
+    prepare_combat_end,
+    prepare_combat_start,
     start_combat,
 )
 from app.services.tools.item_tools import buy_item, use_item
@@ -72,7 +75,7 @@ _NARRATIVE_TOOLS: tuple[BaseTool, ...] = (
     load_character_profile,
     modify_character_state,
     manage_scene_units,
-    start_combat,
+    prepare_combat_start,
     cast_spell,
     use_item,
     buy_item,
@@ -90,10 +93,11 @@ _COMBAT_TOOLS: tuple[BaseTool, ...] = (
     use_class_action,
     use_item,
     attack_action,
+    delegate_combat_turn,
+    prepare_combat_end,
     manage_scene_units,
     use_monster_action,
     next_turn,
-    end_combat,
     cast_spell,
     inspect_unit,
     consult_rules_handbook,
@@ -101,6 +105,8 @@ _COMBAT_TOOLS: tuple[BaseTool, ...] = (
 )
 
 _COMPATIBILITY_TOOLS: tuple[BaseTool, ...] = (
+    start_combat,
+    end_combat,
     manage_adventure,
     inspect_adventure_state,
     load_adventure_node,

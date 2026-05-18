@@ -1,9 +1,12 @@
 ﻿"""Graph node function implementations."""
 
+import json
 from functools import lru_cache
 from time import perf_counter
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langgraph.types import Command
 
 from app.graph.constants import COMBAT_AGENT_MODE, NARRATIVE_AGENT_MODE, STATE_DEATH_SAVE_PAUSE_TURN_KEY
 from app.graph.state import GraphState
@@ -46,6 +49,605 @@ def combat_assistant_node(state: GraphState) -> dict:
     return _invoke_assistant(state, mode=COMBAT_AGENT_MODE)
 
 
+def combat_start_node(state: GraphState) -> dict:
+    """执行 LLM 提交的开战计划；地图、落点、先攻与突袭统一由 workflow 收束。"""
+    from langchain_core.messages import ToolMessage
+
+    from app.services.tools.combat_tools import _execute_start_combat
+
+    pending = _state_value_to_dict(state.get("pending_combat_start"))
+    if not pending:
+        return {}
+
+    workflow_state = dict(state)
+    layout_result = _apply_combat_start_layout(
+        pending,
+        workflow_state,
+        tool_call_id="workflow-combat-start",
+    )
+    if layout_result:
+        layout_result["pending_combat_start"] = None
+        return layout_result
+
+    result = _execute_start_combat(
+        [str(unit_id) for unit_id in pending.get("combatant_ids", [])],
+        [str(unit_id) for unit_id in pending.get("surprised_ids", [])],
+        state=workflow_state,
+        tool_call_id="workflow-combat-start",
+    )
+
+    if isinstance(result, Command):
+        update = dict(result.update or {})
+    elif isinstance(result, str):
+        update = {"messages": [ToolMessage(content=result, tool_call_id="workflow-combat-start")]}
+    else:
+        update = {}
+
+    update["pending_combat_start"] = None
+    if pending.get("map_plan") or pending.get("placements"):
+        update["space"] = workflow_state.get("space")
+    if pending.get("reason") and update.get("messages"):
+        message = update["messages"][0]
+        if isinstance(message, ToolMessage) and not str(message.content).startswith("无法开始战斗"):
+            update["messages"][0] = ToolMessage(
+                content=f"开战裁定：{pending['reason']}\n{message.content}",
+                tool_call_id=message.tool_call_id,
+                name=message.name,
+                additional_kwargs=message.additional_kwargs,
+            )
+    return update
+
+
+def combat_end_node(state: GraphState) -> dict:
+    """执行战斗收束计划；单位结局分类必须先通过 workflow 校验。"""
+    from app.services.tools.combat_tools import end_combat
+
+    pending = _state_value_to_dict(state.get("pending_combat_end"))
+    if not pending:
+        return {}
+
+    plan = _build_combat_end_plan(pending, state)
+    if "messages" in plan:
+        plan["pending_combat_end"] = None
+        return plan
+
+    result = end_combat.invoke({
+        "name": end_combat.name,
+        "args": {
+            "departed_unit_ids": plan["departed_unit_ids"],
+            "defeated_unit_ids": plan["defeated_unit_ids"],
+            "state": dict(state),
+        },
+        "id": "workflow-combat-end",
+        "type": "tool_call",
+    })
+    update = dict(result.update or {}) if isinstance(result, Command) else {}
+    update["pending_combat_end"] = None
+    if pending.get("reason") and update.get("messages"):
+        message = update["messages"][0]
+        if isinstance(message, ToolMessage):
+            update["messages"][0] = ToolMessage(
+                content=f"战斗收束裁定：{pending['reason']}\n{message.content}",
+                tool_call_id=message.tool_call_id,
+                name=message.name,
+                additional_kwargs=message.additional_kwargs,
+            )
+    return update
+
+
+def _build_combat_end_plan(pending: dict, state: GraphState) -> dict:
+    """把剧情结局翻译成底层 end_combat 的 defeated/departed 参数。"""
+    combat = _state_value_to_dict(state.get("combat"))
+    if not combat:
+        return _combat_end_error("无法结束战斗：当前不在战斗中。")
+
+    participants = _state_value_to_dict(combat.get("participants")) or {}
+    outcomes = _normalize_combat_end_outcomes(pending.get("outcomes") or [])
+    unknown_ids = sorted(unit_id for unit_id in outcomes if unit_id not in participants)
+    if unknown_ids:
+        available = ", ".join(participants.keys()) or "无"
+        return _combat_end_error(f"无法结束战斗：结局包含未知单位 {', '.join(unknown_ids)}。可用单位: {available}")
+
+    departed_ids: set[str] = set()
+    defeated_ids: set[str] = set()
+    missing: list[str] = []
+
+    for unit_id, unit in participants.items():
+        unit = _state_value_to_dict(unit)
+        side = str(unit.get("side") or "")
+        hp = int(unit.get("hp", 0) or 0)
+        result = outcomes.get(unit_id, "")
+        if side == "ally":
+            continue
+        if side != "enemy":
+            continue
+        if hp <= 0:
+            defeated_ids.add(unit_id)
+            continue
+        if result in _COMBAT_END_DEFEATED_RESULTS:
+            defeated_ids.add(unit_id)
+            departed_ids.add(unit_id)
+            continue
+        if result in _COMBAT_END_DEPARTED_RESULTS:
+            departed_ids.add(unit_id)
+            continue
+        missing.append(unit_id)
+
+    if missing:
+        labels = ", ".join(f"{unit_id}({participants[unit_id].get('name', unit_id)})" for unit_id in missing)
+        return _combat_end_error(
+            "无法结束战斗：仍存活的敌方单位缺少结局分类。"
+            f" 请标注为 captured/surrendered/subdued/defeated 以获得 XP，或 fled/escaped/retreated/departed 表示逃离不给 XP。缺少: {labels}"
+        )
+
+    return {
+        "departed_unit_ids": sorted(departed_ids),
+        "defeated_unit_ids": sorted(defeated_ids),
+    }
+
+
+_COMBAT_END_DEFEATED_RESULTS = {
+    "captured",
+    "capture",
+    "dead",
+    "defeated",
+    "destroyed",
+    "killed",
+    "nonlethal",
+    "routed",
+    "slain",
+    "subdued",
+    "surrender",
+    "surrendered",
+}
+_COMBAT_END_DEPARTED_RESULTS = {"fled", "escaped", "retreated", "departed", "left", "teleported", "withdrew"}
+
+
+def _normalize_combat_end_outcomes(outcomes: list[dict]) -> dict[str, str]:
+    """结局字段允许 result/outcome/status 等别名，降低模型填参摩擦。"""
+    normalized: dict[str, str] = {}
+    for item in outcomes:
+        if not isinstance(item, dict):
+            continue
+        unit_id = str(item.get("unit_id") or item.get("id") or "").strip()
+        result = str(item.get("result") or item.get("outcome") or item.get("status") or "").strip().lower()
+        if unit_id:
+            normalized[unit_id] = result
+    return normalized
+
+
+def _combat_end_error(content: str) -> dict:
+    """统一构造结束战斗 workflow 的失败消息。"""
+    return {"messages": [ToolMessage(content=content, tool_call_id="workflow-combat-end")]}
+
+
+def _apply_combat_start_layout(pending: dict, state: dict, *, tool_call_id: str) -> dict | None:
+    """按 LLM 的遭遇布置更新地图和落点；错误直接返回可见失败消息。"""
+    from langchain_core.messages import ToolMessage
+    from app.graph.state import PlaneMapState, Point2D, SpaceState, UnitPlacementState
+    from app.services.tools._helpers import resolve_player_reference_id
+    from app.space.geometry import build_space_state, point_in_map
+
+    space = build_space_state(state.get("space"))
+    map_plan = pending.get("map_plan") or {}
+    if map_plan:
+        action = str(map_plan.get("action") or "create").strip().lower()
+        if action == "create":
+            map_id = str(map_plan.get("map_id") or "encounter_map").strip() or "encounter_map"
+            plane_map = PlaneMapState(
+                id=map_id,
+                name=str(map_plan["name"]),
+                width=float(map_plan["width"]),
+                height=float(map_plan["height"]),
+                grid_size=float(map_plan.get("grid_size", 5)),
+                description=str(map_plan.get("description", "")),
+            )
+            space.maps[map_id] = plane_map
+            space.active_map_id = map_id
+        elif action == "switch":
+            map_id = str(map_plan["map_id"])
+            if map_id not in space.maps:
+                return _combat_start_error(f"无法开始战斗：找不到地图 '{map_id}'。", tool_call_id)
+            space.active_map_id = map_id
+        else:
+            return _combat_start_error(f"无法开始战斗：未知地图动作 '{action}'。", tool_call_id)
+
+    if not space.active_map_id or space.active_map_id not in space.maps:
+        return _combat_start_error("无法开始战斗：开战计划没有提供地图，且当前没有可用地图。", tool_call_id)
+
+    active_map = space.maps[space.active_map_id]
+    player_raw = state.get("player")
+    player_dict = player_raw.model_dump() if hasattr(player_raw, "model_dump") else dict(player_raw) if player_raw else None
+    known_ids = set(pending.get("combatant_ids") or [])
+    if player_dict:
+        known_ids.add(resolve_player_reference_id(player_dict, "player"))
+
+    placements = pending.get("placements") or []
+    for placement in placements:
+        raw_unit_id = str(placement["unit_id"])
+        unit_id = resolve_player_reference_id(player_dict, raw_unit_id)
+        if unit_id not in known_ids:
+            return _combat_start_error(f"无法开始战斗：落点单位 '{raw_unit_id}' 不在本次参战单位中。", tool_call_id)
+        point = Point2D(x=float(placement["x"]), y=float(placement["y"]))
+        if not point_in_map(active_map, point):
+            return _combat_start_error(
+                f"无法开始战斗：{raw_unit_id} 的落点 ({point.x:g}, {point.y:g}) 超出地图 {active_map.name}。",
+                tool_call_id,
+            )
+        space.placements[unit_id] = UnitPlacementState(
+            unit_id=unit_id,
+            map_id=active_map.id,
+            position=point,
+            facing_deg=float(placement.get("facing_deg", 0)),
+            footprint_radius=float(placement.get("footprint_radius", 2.5)),
+        )
+
+    state["space"] = SpaceState.model_validate(space).model_dump()
+    return None
+
+
+def _combat_start_error(content: str, tool_call_id: str) -> dict:
+    """统一构造开战 workflow 的失败消息。"""
+    from langchain_core.messages import ToolMessage
+
+    return {"messages": [ToolMessage(content=content, tool_call_id=tool_call_id)]}
+
+
+def combat_executor_node(state: GraphState) -> dict:
+    """执行主 Agent 委托的单单位战斗回合；工具细节在节点内收束成战报。"""
+    pending = _state_value_to_dict(state.get("pending_combat_executor"))
+    if not pending:
+        return {}
+
+    actor_id = str(pending.get("actor_id", ""))
+    instruction = str(pending.get("instruction", "")).strip()
+    combat = _state_value_to_dict(state.get("combat"))
+    current_actor_id = str(combat.get("current_actor_id", ""))
+
+    if not combat:
+        return _combat_executor_blocked(actor_id, "当前不在战斗中。")
+    if actor_id != current_actor_id:
+        return _combat_executor_blocked(
+            actor_id,
+            f"执行器拒绝行动：委托单位 {actor_id} 不是当前行动者 {current_actor_id}。",
+        )
+
+    executor_state = dict(state)
+    actor_before = _get_executor_actor_snapshot(executor_state, actor_id)
+    messages = _build_combat_executor_messages(executor_state, actor_id, instruction)
+    tools = _get_combat_executor_tools()
+    tools_by_name = {tool.name: tool for tool in tools}
+
+    tool_trace: list[dict[str, Any]] = []
+    combat_events: list[dict[str, Any]] = []
+    updated_keys: set[str] = set()
+    status = "completed"
+    blocked_reason: str | None = None
+    pending_reaction = False
+    final_note = ""
+
+    for step in range(3):
+        response = _get_llm_service().invoke_with_tools(
+            messages=messages,
+            tools=tools,
+            system_prompt=_build_combat_executor_system_prompt(),
+            mode=COMBAT_AGENT_MODE,
+        )
+        response = _keep_first_tool_call(response)
+        messages.append(response)
+
+        tool_calls = getattr(response, "tool_calls", None) or []
+        if not tool_calls:
+            final_note = _message_content_to_text(getattr(response, "content", "")).strip()
+            if not tool_trace:
+                status = "no_viable_action"
+                blocked_reason = final_note or "执行器没有选择可执行动作。"
+            break
+
+        tool_call = tool_calls[0]
+        tool_name = str(tool_call.get("name", ""))
+        tool = tools_by_name.get(tool_name)
+        if tool is None:
+            status = "needs_main_agent_decision"
+            blocked_reason = f"执行器选择了未授权工具 {tool_name}。"
+            messages.append(ToolMessage(content=blocked_reason, tool_call_id=str(tool_call.get("id", f"executor-{step}"))))
+            break
+
+        result = _invoke_combat_executor_tool(tool, tool_call, executor_state)
+        update = dict(result.update or {}) if isinstance(result, Command) else {
+            "messages": [ToolMessage(content=str(result), tool_call_id=str(tool_call.get("id", f"executor-{step}")))]
+        }
+        _apply_executor_update(executor_state, update)
+        updated_keys.update(key for key in update if key not in {"messages", "hp_changes"})
+
+        trace_entry = _build_executor_trace_entry(tool_name, tool_call, update)
+        tool_trace.append(trace_entry)
+        combat_events.extend(_build_executor_combat_events(trace_entry))
+        messages.extend(_tool_messages_for_executor_llm(update, tool_call))
+
+        if update.get("pending_reaction"):
+            status = "reaction_pending"
+            pending_reaction = True
+            break
+        if _is_executor_tool_failure(trace_entry):
+            status = "blocked"
+            blocked_reason = trace_entry.get("result") or "执行器动作失败。"
+            break
+
+    actor_after = _get_executor_actor_snapshot(executor_state, actor_id)
+    resource_state = _build_executor_resource_state(actor_after)
+    used_resources = _build_executor_used_resources(actor_before, actor_after)
+    remaining_options = _build_executor_remaining_options(actor_after, status=status)
+    recommended_next = _build_executor_recommended_next(
+        status=status,
+        pending_reaction=pending_reaction,
+        blocked_reason=blocked_reason,
+        tool_trace=tool_trace,
+        remaining_options=remaining_options,
+        resource_state=resource_state,
+    )
+
+    result_state = {
+        "actor_id": actor_id,
+        "status": status,
+        "turn_should_end": recommended_next["kind"] == "end_turn",
+        "needs_main_agent_decision": recommended_next["kind"] == "ask_main_agent",
+        "blocked_reason": blocked_reason,
+        "pending_reaction": pending_reaction,
+        "resource_state": resource_state,
+        "used_resources": used_resources,
+        "remaining_meaningful_options": remaining_options,
+        "recommended_next": recommended_next,
+        "tool_trace": tool_trace,
+        "decision_note": final_note,
+        "narration_hint": _build_executor_narration_hint(tool_trace, final_note),
+    }
+    output = {
+        "pending_combat_executor": None,
+        "combat_executor_result": result_state,
+        "combat_events": combat_events,
+        "messages": [_build_combat_executor_report(result_state)],
+    }
+    for key in updated_keys:
+        output[key] = executor_state.get(key)
+    return output
+
+
+def _combat_executor_blocked(actor_id: str, reason: str) -> dict:
+    """在 workflow 层拒绝非法委托，让主 Agent 拿到结构化失败原因。"""
+    result_state = {
+        "actor_id": actor_id,
+        "status": "blocked",
+        "turn_should_end": False,
+        "needs_main_agent_decision": True,
+        "blocked_reason": reason,
+        "pending_reaction": False,
+        "resource_state": {},
+        "used_resources": [],
+        "remaining_meaningful_options": [],
+        "recommended_next": {"kind": "ask_main_agent", "reason": reason},
+        "tool_trace": [],
+        "decision_note": reason,
+        "narration_hint": reason,
+    }
+    return {
+        "pending_combat_executor": None,
+        "combat_executor_result": result_state,
+        "combat_events": [],
+        "messages": [_build_combat_executor_report(result_state)],
+    }
+
+
+@lru_cache(maxsize=1)
+def _get_combat_executor_tools() -> tuple:
+    """执行器只暴露战斗落子所需工具，避免它推进回合或改写遭遇结构。"""
+    from app.services.tools.character_tools import inspect_unit
+    from app.services.tools.class_action_tools import use_class_action
+    from app.services.tools.combat_tools import attack_action
+    from app.services.tools.item_tools import use_item
+    from app.services.tools.monster_action_tools import use_monster_action
+    from app.services.tools.space_tools import manage_space
+    from app.services.tools.spell_tools import cast_spell
+
+    return (
+        manage_space,
+        use_monster_action,
+        attack_action,
+        cast_spell,
+        use_class_action,
+        use_item,
+        inspect_unit,
+    )
+
+
+def _build_combat_executor_system_prompt() -> str:
+    """给执行器一份短而硬的战术契约：按委托落子，遇到阻塞就停。"""
+    return (
+        "你是战斗回合执行器，只负责把主 Agent 的战术委托转成当前行动者的合法战斗操作。"
+        "不要推进到下一个单位，不要结束战斗，不要改写剧情目标。"
+        "优先完成委托中明确要求的移动、攻击、施法、职业动作或物品使用；"
+        "如果动作失败、资源不足、触发玩家反应或需要重新裁定目标，立即停止并用简短文本说明原因。"
+        "完成可执行动作后停止调用工具，用简短文本说明执行结果和你建议主 Agent 下一步做什么。"
+    )
+
+
+def _build_combat_executor_messages(state: dict, actor_id: str, instruction: str) -> list[BaseMessage]:
+    """只给执行器当前回合事实，减少主对话上下文对战术落子的干扰。"""
+    payload = {
+        "actor_id": actor_id,
+        "instruction": instruction,
+        "scene_summary": state.get("scene_summary", ""),
+        "combat": _state_value_to_dict(state.get("combat")),
+        "player": _state_value_to_dict(state.get("player")),
+        "space": _state_value_to_dict(state.get("space")),
+    }
+    return [HumanMessage(content="战斗执行委托：\n" + json.dumps(payload, ensure_ascii=False, default=str))]
+
+
+def _invoke_combat_executor_tool(tool: Any, tool_call: dict, state: dict) -> object:
+    """按 LangChain ToolCall 形态调用工具，并把执行器局部状态注入进去。"""
+    args = dict(tool_call.get("args") or {})
+    args["state"] = state
+    return tool.invoke({
+        "name": tool.name,
+        "args": args,
+        "id": str(tool_call.get("id") or f"executor-{tool.name}"),
+        "type": "tool_call",
+    })
+
+
+def _apply_executor_update(state: dict, update: dict) -> None:
+    """把工具 Command.update 串行合并到执行器局部状态，下一次工具看到最新战场。"""
+    for key, value in update.items():
+        if key == "messages":
+            state[key] = [*list(state.get(key, [])), *list(value or [])]
+        else:
+            state[key] = value
+
+
+def _tool_messages_for_executor_llm(update: dict, tool_call: dict) -> list[ToolMessage]:
+    """维持 tool-call 协议，让执行器模型能基于上一工具结果继续落子。"""
+    tool_messages = [message for message in update.get("messages", []) if isinstance(message, ToolMessage)]
+    if tool_messages:
+        return tool_messages
+    return [ToolMessage(content="工具已执行。", tool_call_id=str(tool_call.get("id") or "executor-tool"))]
+
+
+def _build_executor_trace_entry(tool_name: str, tool_call: dict, update: dict) -> dict[str, Any]:
+    """把一次工具调用压成主 Agent 可读、前端可转发的事实记录。"""
+    messages = list(update.get("messages", []) or [])
+    contents = [_message_content_to_text(getattr(message, "content", "")) for message in messages]
+    attack_roll = next(
+        (
+            message.additional_kwargs.get("attack_roll")
+            for message in messages
+            if isinstance(message, ToolMessage)
+            and isinstance(message.additional_kwargs, dict)
+            and isinstance(message.additional_kwargs.get("attack_roll"), dict)
+        ),
+        None,
+    )
+    return {
+        "tool": tool_name,
+        "args": dict(tool_call.get("args") or {}),
+        "result": "\n".join(content for content in contents if content).strip(),
+        "attack_roll": attack_roll,
+        "hp_changes": list(update.get("hp_changes", []) or []),
+    }
+
+
+def _build_executor_combat_events(trace_entry: dict[str, Any]) -> list[dict[str, Any]]:
+    """复用工具产出的骰子与血量事实，交给 SSE 层驱动现有动画。"""
+    if not trace_entry.get("result") and not trace_entry.get("hp_changes") and not trace_entry.get("attack_roll"):
+        return []
+    return [{
+        "kind": "tool",
+        "tool": trace_entry.get("tool"),
+        "content": trace_entry.get("result", ""),
+        "attack_roll": trace_entry.get("attack_roll"),
+        "hp_changes": trace_entry.get("hp_changes", []),
+    }]
+
+
+def _is_executor_tool_failure(trace_entry: dict[str, Any]) -> bool:
+    """工具失败标记意味着战术委托需要主 Agent 重新裁量。"""
+    result = str(trace_entry.get("result", ""))
+    return result.startswith("[动作失败]") or result.startswith("[攻击失败]") or result.startswith("无法")
+
+
+def _get_executor_actor_snapshot(state: dict, actor_id: str) -> dict:
+    """读取当前行动者快照，供执行器比较资源使用前后变化。"""
+    from app.services.tools._helpers import get_combatant
+
+    combat = _state_value_to_dict(state.get("combat"))
+    player = _state_value_to_dict(state.get("player"))
+    actor = get_combatant(combat, player, actor_id) if combat else None
+    return dict(actor or {})
+
+
+def _build_executor_resource_state(actor: dict) -> dict[str, Any]:
+    """把动作经济压成稳定字段，避免主 Agent 从整张角色卡里猜。"""
+    return {
+        "action_available": bool(actor.get("action_available", True)),
+        "extra_action_available": bool(actor.get("extra_action_available", False)),
+        "bonus_action_available": bool(actor.get("bonus_action_available", True)),
+        "reaction_available": bool(actor.get("reaction_available", True)),
+        "movement_left": int(actor.get("movement_left", actor.get("speed", 0)) or 0),
+    }
+
+
+def _build_executor_used_resources(before: dict, after: dict) -> list[str]:
+    """用前后快照识别执行器实际花掉的资源，不猜测战术价值。"""
+    before_state = _build_executor_resource_state(before)
+    after_state = _build_executor_resource_state(after)
+    used: list[str] = []
+    for key in ("action_available", "extra_action_available", "bonus_action_available", "reaction_available"):
+        if before_state[key] and not after_state[key]:
+            used.append(key.removesuffix("_available"))
+    if after_state["movement_left"] < before_state["movement_left"]:
+        used.append("movement")
+    return used
+
+
+def _build_executor_remaining_options(actor: dict, *, status: str) -> list[str]:
+    """只提示客观剩余资源，不把药水/职业能力写成必须使用。"""
+    if status in {"blocked", "reaction_pending", "needs_main_agent_decision"}:
+        return []
+
+    resource_state = _build_executor_resource_state(actor)
+    options: list[str] = []
+    if resource_state["action_available"] or resource_state["extra_action_available"]:
+        options.append("主要动作仍可用；若主指令尚未完成，应继续委托执行器。")
+    if resource_state["bonus_action_available"]:
+        options.append("附赠动作仍可用；仅在主 Agent 明确有战术意图或可用能力时使用。")
+    if resource_state["movement_left"] > 0:
+        options.append(f"仍有 {resource_state['movement_left']} 尺移动；只有撤退、靠近、占位或脱离危险有意义时才继续移动。")
+    return options
+
+
+def _build_executor_recommended_next(
+    *,
+    status: str,
+    pending_reaction: bool,
+    blocked_reason: str | None,
+    tool_trace: list[dict[str, Any]],
+    remaining_options: list[str],
+    resource_state: dict[str, Any],
+) -> dict[str, Any]:
+    """由执行器汇报下一步建议，让主 Agent 少做流程猜测。"""
+    if pending_reaction or status == "reaction_pending":
+        return {"kind": "wait_reaction", "reason": "执行过程中触发了玩家反应，必须等待反应选择后再继续。"}
+    if status in {"blocked", "needs_main_agent_decision", "no_viable_action"}:
+        return {"kind": "ask_main_agent", "reason": blocked_reason or "执行器无法完成当前委托，需要主 Agent 重新裁定。"}
+    if not tool_trace:
+        return {"kind": "ask_main_agent", "reason": "执行器没有产生任何工具结果，需要主 Agent 明确战术意图。"}
+
+    has_primary_action = bool(resource_state.get("action_available") or resource_state.get("extra_action_available"))
+    if has_primary_action:
+        return {
+            "kind": "continue_executor",
+            "reason": "当前行动者仍有主要动作资源；若战术目标尚未完成，建议继续委托执行器。",
+        }
+    return {
+        "kind": "end_turn",
+        "reason": "主要动作已完成；剩余资源属于可选项，若没有明确战术收益，建议结束回合。",
+        "remaining_options": remaining_options,
+    }
+
+
+def _build_executor_narration_hint(tool_trace: list[dict[str, Any]], final_note: str) -> str:
+    """给主 Agent 一行可直接转述或改写的战斗结果提示。"""
+    if final_note:
+        return final_note
+    return "\n".join(entry.get("result", "") for entry in tool_trace if entry.get("result")).strip()
+
+
+def _build_combat_executor_report(result_state: dict[str, Any]) -> HumanMessage:
+    """把执行器结果作为内部系统消息回灌，使主 Agent 下一步只读一条摘要。"""
+    content = "[系统:战斗执行器]\n" + json.dumps(result_state, ensure_ascii=False, default=str)
+    return HumanMessage(content=content)
+
+
 def _invoke_assistant(state: GraphState, mode: str) -> dict:
     from app.utils.logger import logger
 
@@ -54,7 +656,7 @@ def _invoke_assistant(state: GraphState, mode: str) -> dict:
     assembled_context = assembler.assemble(state, mode, base_system_prompt=base_system_prompt)
     runtime_state_message = build_runtime_state_message(assembled_context.runtime_state_text)
     invocation_messages = [*assembled_context.model_input_messages, runtime_state_message]
-    tools = get_tool_profile(mode)
+    tools = _get_assistant_tools_for_state(state, mode)
     session_id = str(state.get("session_id") or "detached")
     phase = state.get("phase")
 
@@ -120,6 +722,48 @@ def _invoke_assistant(state: GraphState, mode: str) -> dict:
         "messages": [runtime_state_message, response],
         "output": output,
     }
+
+
+_AGENT_CONTROLLED_TURN_TOOL_NAMES = {
+    "delegate_combat_turn",
+    "prepare_combat_end",
+    "next_turn",
+    "inspect_unit",
+    "consult_rules_handbook",
+}
+
+
+def _get_assistant_tools_for_state(state: GraphState, mode: str) -> list:
+    """敌方与 AI 托管友方回合只让主 Agent 做裁决和委托，实际落子交给执行器。"""
+    tools = get_tool_profile(mode)
+    if mode != COMBAT_AGENT_MODE or not _is_agent_controlled_combat_turn(state):
+        return tools
+    return [tool for tool in tools if tool.name in _AGENT_CONTROLLED_TURN_TOOL_NAMES]
+
+
+def _is_agent_controlled_combat_turn(state: GraphState) -> bool:
+    """识别必须走执行器的当前行动者，玩家与玩家接管友方仍保留完整动作入口。"""
+    combat = _state_value_to_dict(state.get("combat"))
+    if not combat:
+        return False
+
+    current_id = str(combat.get("current_actor_id") or "")
+    player = _state_value_to_dict(state.get("player"))
+    if player and current_id == str(player.get("id") or ""):
+        return False
+
+    actor = _state_value_to_dict((combat.get("participants") or {}).get(current_id))
+    if not actor:
+        return False
+    if actor.get("side") == "enemy":
+        return True
+    if actor.get("side") != "ally":
+        return False
+    if int(actor.get("hp", 0) or 0) <= 0:
+        return False
+
+    control_mode = str(actor.get("control_mode") or actor.get("controlled_by") or "").lower()
+    return bool(actor.get("autopilot") or actor.get("llm_controlled") or control_mode in {"ai", "llm", "agent"})
 
 
 def _keep_first_tool_call(response: BaseMessage) -> BaseMessage:

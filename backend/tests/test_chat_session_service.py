@@ -30,12 +30,16 @@ class FakeGraph:
     async def ainvoke(self, graph_input, config):
         self.last_input = graph_input
         self.last_config = config
+        if isinstance(graph_input, dict) and graph_input.get("messages"):
+            self.values["messages"] = [*list(self.values.get("messages", [])), *list(graph_input["messages"])]
         self.values = {**self.values, **self.result}
         return self.result
 
     async def astream(self, graph_input, config, stream_mode):
         self.last_input = graph_input
         self.last_config = config
+        if isinstance(graph_input, dict) and graph_input.get("messages"):
+            self.values["messages"] = [*list(self.values.get("messages", [])), *list(graph_input["messages"])]
         self.values = {**self.values, **self.result}
         yield {"assistant": self.result}
 
@@ -43,7 +47,7 @@ class FakeGraph:
         self.last_config = config
         return SimpleNamespace(values=self.values, tasks=self.tasks)
 
-    async def aupdate_state(self, config, values):
+    async def aupdate_state(self, config, values, as_node=None):
         self.last_config = config
         self.state_updates.append(values)
         self.values = {**self.values, **values}
@@ -486,6 +490,122 @@ class ChatSessionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["adventure_hook_meet_me_in_phandalin", "goblin_ambush"], history["adventure"]["unlocked_node_ids"])
         self.assertEqual(["goblin_ambush"], history["adventure"]["breadcrumb_node_ids"])
         self.assertEqual([], history["adventure"]["deferred_node_ids"])
+
+    async def test_end_player_controlled_turn_uses_tool_without_agent_message(self):
+        graph = FakeGraph({})
+        graph.values = {
+            "messages": [],
+            "phase": "combat",
+            "player": {
+                "id": "player_hero",
+                "name": "英雄",
+                "side": "player",
+                "hp": 12,
+                "max_hp": 12,
+                "action_available": False,
+            },
+            "combat": {
+                "round": 1,
+                "current_actor_id": "player_hero",
+                "initiative_order": ["player_hero", "ally_1"],
+                "participants": {
+                    "ally_1": {
+                        "id": "ally_1",
+                        "name": "伊莲",
+                        "side": "ally",
+                        "hp": 9,
+                        "max_hp": 9,
+                    }
+                },
+            },
+        }
+        service = ChatSessionService(graph, adventure_director=_noop_director())
+
+        result = await service.end_player_controlled_turn(session_id="demo", actor_id="player_hero")
+
+        self.assertEqual(result["combat"]["current_actor_id"], "ally_1")
+        self.assertIn("当前行动者：伊莲", result["message"])
+        self.assertIsNone(graph.last_input)
+        self.assertTrue(graph.state_updates)
+        flow_message = graph.state_updates[-1]["messages"][0]
+        self.assertIsInstance(flow_message, HumanMessage)
+        self.assertIn("[系统:前端结束回合]", flow_message.content)
+        self.assertIn("next_turn: 第 1 回合", flow_message.content)
+
+    async def test_end_player_controlled_turn_rejects_enemy_actor(self):
+        graph = FakeGraph({})
+        graph.values = {
+            "messages": [],
+            "phase": "combat",
+            "player": {"id": "player_hero", "name": "英雄", "side": "player", "hp": 12, "max_hp": 12},
+            "combat": {
+                "round": 1,
+                "current_actor_id": "goblin_1",
+                "initiative_order": ["goblin_1", "player_hero"],
+                "participants": {
+                    "goblin_1": {
+                        "id": "goblin_1",
+                        "name": "Goblin",
+                        "side": "enemy",
+                        "hp": 7,
+                        "max_hp": 7,
+                    }
+                },
+            },
+        }
+        service = ChatSessionService(graph, adventure_director=_noop_director())
+
+        with self.assertRaises(ValueError):
+            await service.end_player_controlled_turn(session_id="demo", actor_id="goblin_1")
+
+    async def test_end_player_controlled_turn_wakes_agent_for_enemy_turn(self):
+        graph = FakeGraph({
+            "messages": [AIMessage(content="Goblin 眯起眼睛，开始寻找射击角度。")],
+        })
+        graph.values = {
+            "messages": [],
+            "phase": "combat",
+            "player": {
+                "id": "player_hero",
+                "name": "英雄",
+                "side": "player",
+                "hp": 12,
+                "max_hp": 12,
+            },
+            "combat": {
+                "round": 1,
+                "current_actor_id": "player_hero",
+                "initiative_order": ["player_hero", "goblin_1"],
+                "participants": {
+                    "goblin_1": {
+                        "id": "goblin_1",
+                        "name": "Goblin",
+                        "side": "enemy",
+                        "hp": 7,
+                        "max_hp": 7,
+                        "action_available": True,
+                    }
+                },
+            },
+        }
+        service = ChatSessionService(graph, adventure_director=_noop_director())
+
+        result = await service.end_player_controlled_turn(session_id="demo", actor_id="player_hero")
+
+        self.assertEqual(result["combat"]["current_actor_id"], "goblin_1")
+        self.assertIsNotNone(graph.last_input)
+        handoff = graph.last_input["messages"][0]
+        self.assertIsInstance(handoff, HumanMessage)
+        self.assertIn("[系统:战斗流程接管]", handoff.content)
+        self.assertIn("当前行动者是 Goblin [ID:goblin_1]", handoff.content)
+        self.assertTrue(any(
+            "[系统:前端结束回合]" in getattr(update.get("messages", [None])[0], "content", "")
+            for update in graph.state_updates
+        ))
+        self.assertIn(
+            {"type": "assistant_message", "content": "Goblin 眯起眼睛，开始寻找射击角度。"},
+            result["events"],
+        )
 
 
 if __name__ == "__main__":

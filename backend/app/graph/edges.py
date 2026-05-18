@@ -4,8 +4,11 @@ from langchain_core.messages import AIMessage
 
 from app.graph.constants import (
     ASSISTANT_NODE,
+    COMBAT_END_NODE,
     COMBAT_ASSISTANT_NODE,
+    COMBAT_EXECUTOR_NODE,
     COMBAT_RESOLUTION_NODE,
+    COMBAT_START_NODE,
     DEATH_SAVE_PAUSE_NODE,
     END_NODE,
     ROUTER_NODE,
@@ -59,6 +62,15 @@ def _is_combat_active(state: GraphState) -> bool:
 
 
 def route_from_router(state: GraphState) -> str:
+    if state.get("pending_combat_executor"):
+        return COMBAT_EXECUTOR_NODE
+
+    if state.get("pending_combat_start"):
+        return COMBAT_START_NODE
+
+    if state.get("pending_combat_end"):
+        return COMBAT_END_NODE
+
     if state.get("pending_reaction"):
         if state.get("reaction_choice") is not None:
             return REACTION_RESOLUTION_NODE
@@ -82,6 +94,15 @@ def route_from_combat_assistant(state: GraphState) -> str:
 
 
 def _route_after_assistant_message(state: GraphState) -> str:
+    if state.get("pending_combat_executor"):
+        return COMBAT_EXECUTOR_NODE
+
+    if state.get("pending_combat_start"):
+        return COMBAT_START_NODE
+
+    if state.get("pending_combat_end"):
+        return COMBAT_END_NODE
+
     messages = state.get("messages", [])
     if not messages:
         return END_NODE
@@ -116,6 +137,12 @@ def _is_monster_turn(state: GraphState) -> bool:
 
 def route_from_tool(state: GraphState) -> str:
     """工具执行后：战斗态统一回 combat assistant，待决反应除外。"""
+    if state.get("pending_combat_executor"):
+        return COMBAT_EXECUTOR_NODE
+    if state.get("pending_combat_start"):
+        return COMBAT_START_NODE
+    if state.get("pending_combat_end"):
+        return COMBAT_END_NODE
     if state.get("pending_reaction"):
         return END_NODE
     if _is_combat_active(state):
@@ -132,6 +159,25 @@ def route_from_combat_resolution(state: GraphState) -> str:
     return _assistant_node_for_phase(state)
 
 
+def route_from_combat_start(state: GraphState) -> str:
+    """开战计划执行后按 phase 回到对应代理；失败则继续探索态处理。"""
+    return _assistant_node_for_phase(state)
+
+
+def route_from_combat_end(state: GraphState) -> str:
+    """结束战斗 workflow 后按新 phase 回到对应代理。"""
+    return _assistant_node_for_phase(state)
+
+
+def route_from_combat_executor(state: GraphState) -> str:
+    """执行器完成后进入战斗后置节点，让反应/死亡豁免等流程继续接管。"""
+    if state.get("pending_reaction"):
+        return END_NODE
+    if _is_combat_active(state):
+        return COMBAT_RESOLUTION_NODE
+    return _assistant_node_for_phase(state)
+
+
 def route_from_reaction_resolution(state: GraphState) -> str:
     """反应解析后：若仍存在待决反应则暂停，否则统一交回 phase 对应 assistant。"""
     if state.get("pending_reaction"):
@@ -144,6 +190,9 @@ def route_from_reaction_resolution(state: GraphState) -> str:
 ROUTE_OPTIONS = {
     ASSISTANT_NODE: ASSISTANT_NODE,
     COMBAT_ASSISTANT_NODE: COMBAT_ASSISTANT_NODE,
+    COMBAT_END_NODE: COMBAT_END_NODE,
+    COMBAT_EXECUTOR_NODE: COMBAT_EXECUTOR_NODE,
+    COMBAT_START_NODE: COMBAT_START_NODE,
     COMBAT_RESOLUTION_NODE: COMBAT_RESOLUTION_NODE,
     DEATH_SAVE_PAUSE_NODE: DEATH_SAVE_PAUSE_NODE,
     TOOL_NODE: TOOL_NODE,

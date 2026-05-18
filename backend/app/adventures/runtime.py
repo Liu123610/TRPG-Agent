@@ -58,7 +58,7 @@ DIRECTOR_SYSTEM_PROMPT = (
     "pre_turn 遇到拥有多个出口的节点时，'继续'、'继续前进'、'走吧'、'往前走'、'出发'这类泛化行动必须输出 null，"
     "除非玩家同时明确说出去凡达林、追踪地精踪迹、进入洞口、返回遇袭地点等具体目标。"
     "pre_turn 如果当前节点仍需主持呈现场景、处理遭遇、等待玩家调查或结算工具结果，不要提前跳过该节点。"
-    "系统授权事实高于冒险节点：开局友方准则允许引入一名 fighter_companion 战士同伴，不要将其姓名、同行身份或简短引入判为越界。"
+    "系统授权事实高于冒险节点：开局友方准则允许引入一名名为格林的 fighter_companion 战士同伴；格林不是修达·霍温特，不要将其姓名、同行身份或简短引入判为越界。"
     "专名音译和英文名视为同一实体；不要仅因“凡达林/凡戴尔/Phandalin”或“冈德伦/甘德伦/Gundren”写法差异判定越界。"
     "如果玩家想回到之前离开的节点，或想补回被跳过的场景，可以输出 target_node_id 和 transition_kind=revisit；"
     "如果玩家或主持回复明显指向某个语义上更合适的节点，而当前节点出口不够用，可以输出 target_node_id 和 transition_kind=switch；"
@@ -1281,7 +1281,7 @@ def _system_authorized_facts(state: dict[str, Any]) -> list[str]:
     if _opening_companion_authorized(state):
         facts.insert(
             0,
-            "开局友方准则授权一名 fighter_companion 战士同伴；其姓名、同行身份与简短引入不属于冒险节点越界。",
+            "开局友方准则授权一名名为格林的 fighter_companion 战士同伴；格林是玩家开局同行队友，不是修达·霍温特，其姓名、同行身份与简短引入不属于冒险节点越界。",
         )
     return facts
 
@@ -1309,6 +1309,8 @@ def _opening_companion_authorized(state: dict[str, Any]) -> bool:
 
 def _is_opening_companion_claim(claim: str) -> bool:
     text = claim.lower()
+    if any(term in text for term in ("修达", "sildar", "霍温特", "hallwinter")):
+        return False
     companion_terms = (
         "fighter_companion",
         "开局友方",
@@ -1317,9 +1319,7 @@ def _is_opening_companion_claim(claim: str) -> bool:
         "同行",
         "旅伴",
         "战士",
-        "艾琳",
-        "铁盾",
-        "冒险者公会",
+        "格林",
         "甘德伦",
         "信件",
         "结识",

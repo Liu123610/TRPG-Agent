@@ -36,7 +36,7 @@ class _FakeGraph:
         for chunk in self._chunks:
             yield chunk
 
-    async def aupdate_state(self, config, values):
+    async def aupdate_state(self, config, values, as_node=None):
         self.state_updates.append(values)
         self._states[-1].values = {**self._states[-1].values, **values}
 
@@ -186,6 +186,44 @@ def test_stream_emits_dice_roll_card_payload_for_attack_roll():
         "formula": "1d20",
         "advantage": "normal",
     }]
+
+
+def test_stream_replays_executor_combat_events_for_existing_animations():
+    initial_state = _FakeState({})
+    final_state = _FakeState({})
+    graph = _FakeGraph(
+        initial_state=initial_state,
+        final_state=final_state,
+        chunks=[{
+            "combat_executor": {
+                "combat_events": [{
+                    "content": "Goblin 挥出弯刀。",
+                    "attack_roll": {
+                        "raw_roll": 13,
+                        "final_total": 17,
+                        "attack_bonus": 4,
+                        "target_ac": 16,
+                        "attack_name": "Scimitar",
+                    },
+                    "hp_changes": [{"target_id": "player_hero", "old_hp": 18, "new_hp": 13}],
+                }],
+            }
+        }],
+    )
+    service = _service(graph)
+
+    async def _collect_events():
+        return [event async for event in service.process_turn_stream(session_id="demo", message="test")]
+
+    parsed_events = [_parse_sse_event(event) for event in asyncio.run(_collect_events())]
+
+    dice_events = [payload for name, payload in parsed_events if name == "dice_roll"]
+    combat_events = [payload for name, payload in parsed_events if name == "combat_action"]
+    assert dice_events[0]["title"] == "Scimitar"
+    assert combat_events[0] == {
+        "content": "Goblin 挥出弯刀。",
+        "hp_changes": [{"target_id": "player_hero", "old_hp": 18, "new_hp": 13}],
+    }
 
 
 def test_stream_emits_state_update_before_followup_assistant_reply():
@@ -369,6 +407,92 @@ def test_stream_keeps_ai_text_even_when_message_contains_tool_calls():
         "战斗开始！让我先为哥布林1执行攻击。",
         "哥布林1失手了，现在轮到哥布林2行动。",
     ]
+
+
+def test_stream_hides_internal_workflow_preludes():
+    initial_state = _FakeState({"messages": []})
+    final_state = _FakeState({"messages": []})
+    graph = _FakeGraph(
+        initial_state=initial_state,
+        final_state=final_state,
+        chunks=[
+            {
+                "assistant": {
+                    "messages": [
+                        AIMessage(
+                            content="好的，我来布置剩余地精并提交开战计划。",
+                            tool_calls=[{"name": "manage_space", "args": {}, "id": "call_1"}],
+                        )
+                    ],
+                }
+            },
+            {
+                "assistant": {
+                    "messages": [AIMessage(content="灌木中箭矢破空，战斗真正开始。", tool_calls=[])],
+                }
+            },
+        ],
+    )
+    service = _service(graph)
+
+    async def _collect_events():
+        return [event async for event in service.process_turn_stream(session_id="demo", message="继续")]
+
+    parsed_events = [_parse_sse_event(event) for event in asyncio.run(_collect_events())]
+    assistant_messages = [payload["content"] for name, payload in parsed_events if name == "assistant_message"]
+
+    assert assistant_messages == ["灌木中箭矢破空，战斗真正开始。"]
+
+
+def test_end_player_controlled_turn_stream_wakes_enemy_incrementally():
+    initial_state = _FakeState({
+        "messages": [],
+        "phase": "combat",
+        "player": {"id": "player_hero", "name": "英雄", "side": "player", "hp": 12, "max_hp": 12},
+        "combat": {
+            "round": 1,
+            "current_actor_id": "player_hero",
+            "initiative_order": ["player_hero", "goblin_1"],
+            "participants": {"goblin_1": {"id": "goblin_1", "name": "Goblin", "side": "enemy", "hp": 7, "max_hp": 7}},
+        },
+    })
+    final_state = _FakeState({
+        "messages": [],
+        "phase": "combat",
+        "player": {"id": "player_hero", "name": "英雄", "side": "player", "hp": 12, "max_hp": 12},
+        "combat": {
+            "round": 1,
+            "current_actor_id": "goblin_1",
+            "initiative_order": ["player_hero", "goblin_1"],
+            "participants": {"goblin_1": {"id": "goblin_1", "name": "Goblin", "side": "enemy", "hp": 7, "max_hp": 7}},
+        },
+    })
+    graph = _FakeGraph(
+        initial_state=initial_state,
+        final_state=final_state,
+        chunks=[
+            {
+                "combat_executor": {
+                    "combat_events": [{
+                        "content": "Goblin 射出短弓。",
+                        "attack_roll": {"raw_roll": 12, "attack_bonus": 4, "final_total": 16, "target_ac": 16, "attack_name": "Shortbow"},
+                        "hp_changes": [{"target_id": "player_hero", "old_hp": 12, "new_hp": 8}],
+                    }],
+                }
+            }
+        ],
+    )
+    service = _service(graph)
+
+    async def _collect_events():
+        return [event async for event in service.end_player_controlled_turn_stream(session_id="demo", actor_id="player_hero")]
+
+    parsed_events = [_parse_sse_event(event) for event in asyncio.run(_collect_events())]
+    event_names = [name for name, _ in parsed_events]
+
+    assert "dice_roll" in event_names
+    assert "combat_action" in event_names
+    assert event_names[-1] == "done"
 
 
 def test_stream_clears_hot_episodic_context_before_graph_stream():

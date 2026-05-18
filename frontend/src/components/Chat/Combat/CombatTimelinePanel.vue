@@ -4,8 +4,10 @@
       :external-player="player"
       :combat="combat"
       :space="space"
+      :scene-units="sceneUnits"
       :selected-unit="selectedUnit"
       :send-combat-action-request="sendCombatActionRequest"
+      :end-combat-turn-request="endCombatTurnRequest"
       @action-notice="handleActionNotice"
     />
   </aside>
@@ -20,8 +22,10 @@ const props = defineProps<{
   player: PlayerState | null
   combat: Record<string, any> | null
   space: Record<string, any> | null
+  sceneUnits?: Record<string, any> | null
   selectedUnit: AvailabilitySelectionUnit | null
   sendCombatActionRequest?: ((message: string) => Promise<void>) | null
+  endCombatTurnRequest?: ((actorId: string) => Promise<void>) | null
   isCollapsed?: boolean
 }>()
 

@@ -93,7 +93,7 @@ LOST_MINE_ACTIONS: dict[str, list[MonsterAction]] = {
             name="Nimble Escape",
             kind="bonus_action",
             action_type="bonus_action",
-            description="Disengage or Hide as a bonus action.",
+            description="Use Disengage as a bonus action; Hide requires a separate explicit stealth check.",
         ),
     ],
     "wolf": [

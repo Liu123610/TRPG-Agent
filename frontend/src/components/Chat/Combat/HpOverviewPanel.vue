@@ -24,9 +24,9 @@
             'is-enemy-turn': unit.isCurrentActor && unit.side === 'enemy',
             'is-player-turn': unit.isCurrentActor && unit.side !== 'enemy',
             'is-player-unit': unit.isPlayerUnit,
-            'is-clickable': canOpenPlayerActions && unit.isPlayerUnit,
+            'is-clickable': canOpenControlledActions && unit.isCurrentActor && unit.side !== 'enemy',
           }"
-          :disabled="!unit.isPlayerUnit || !combatActive"
+          :disabled="!combatActive || !unit.isCurrentActor || unit.side === 'enemy'"
           @click="handleUnitClick(unit)"
         >
           <div class="item-meta">
@@ -56,9 +56,10 @@
 
     <CombatActionSheet
       :open="actionSheetOpen"
-      :actor-name="playerDisplayName"
+      :actor-name="controlledActorName"
       :groups="actionGroups"
       :selected-target-name="selectedTargetName"
+      :disabled-end-turn="!canEndCurrentTurn"
       @close="actionSheetOpen = false"
       @submit="handleActionSubmit"
       @blocked="handleActionBlocked"
@@ -97,8 +98,10 @@ const props = defineProps<{
   externalPlayer: PlayerState | null
   combat?: Record<string, any> | null
   space?: Record<string, any> | null
+  sceneUnits?: Record<string, any> | null
   selectedUnit?: AvailabilitySelectionUnit | null
   sendCombatActionRequest?: ((message: string) => Promise<void>) | null
+  endCombatTurnRequest?: ((actorId: string) => Promise<void>) | null
 }>()
 const emit = defineEmits<{
   actionNotice: [text: string]
@@ -186,8 +189,28 @@ const activeActorLabel = computed(() => {
   return `${currentActor.name} 正在行动`
 })
 
-const canOpenPlayerActions = computed(() => {
-  return combatActive.value && !!props.externalPlayer && currentActorId.value === playerUnitId.value
+const currentActor = computed(() => hpUnits.value.find((unit) => unit.isCurrentActor) ?? null)
+
+const canOpenControlledActions = computed(() => {
+  const actor = currentActor.value
+  return combatActive.value && !!actor && actor.side !== 'enemy'
+})
+
+const canEndCurrentTurn = computed(() => {
+  const actor = currentActor.value
+  return combatActive.value && !!actor && actor.side !== 'enemy' && !!props.endCombatTurnRequest
+})
+
+const controlledActorName = computed(() => currentActor.value?.name || playerDisplayName.value)
+
+const controlledActorState = computed<PlayerState | null>(() => {
+  const actor = currentActor.value
+  if (!actor) return null
+  if (actor.isPlayerUnit) return props.externalPlayer
+
+  const participant = props.combat?.participants?.[actor.id]
+  if (!participant || typeof participant !== 'object') return null
+  return normalizeControlledActorState(participant as Record<string, any>, actor.id, actor.name, actor.side)
 })
 
 const selectedTargetName = computed(() => {
@@ -196,9 +219,10 @@ const selectedTargetName = computed(() => {
 })
 
 const actionGroups = computed<CombatActionMenuGroup[]>(() => {
-  if (!props.externalPlayer) return []
+  const actorState = controlledActorState.value
+  if (!actorState) return []
   return buildCombatActionMenu({
-    player: props.externalPlayer,
+    player: actorState,
     combat: props.combat ?? null,
     space: props.space ?? null,
     selectedUnit: props.selectedUnit ?? null,
@@ -210,13 +234,14 @@ watch(
   (actorId) => {
     if (!actorId || actorId === previousCurrentActorId.value) return
     previousCurrentActorId.value = actorId
-    actionSheetOpen.value = actorId === playerUnitId.value
+    const actor = hpUnits.value.find((unit) => unit.id === actorId)
+    actionSheetOpen.value = !!actor && actor.side !== 'enemy'
   },
   { immediate: true },
 )
 
 const handleUnitClick = (unit: HpOverviewUnit) => {
-  if (!unit.isPlayerUnit || !canOpenPlayerActions.value) return
+  if (!unit.isCurrentActor || unit.side === 'enemy' || !canOpenControlledActions.value) return
   actionSheetOpen.value = true
 }
 
@@ -238,13 +263,17 @@ const handleActionBlocked = (reason: string) => {
 }
 
 const handleEndTurn = async () => {
-  if (!props.sendCombatActionRequest) {
+  if (!props.endCombatTurnRequest) {
     emitActionNotice('当前聊天发送器不可用，暂时无法提交结束回合请求。')
+    return
+  }
+  if (!currentActor.value || currentActor.value.side === 'enemy') {
+    emitActionNotice('当前不是玩家或友方单位的回合。')
     return
   }
 
   actionSheetOpen.value = false
-  await props.sendCombatActionRequest('我结束回合')
+  await props.endCombatTurnRequest(currentActor.value.id)
 }
 
 const emitActionNotice = (text: string) => {
@@ -286,6 +315,53 @@ function normalizeText(value: unknown): string {
 
 function toNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function normalizeControlledActorState(
+  participant: Record<string, any>,
+  fallbackId: string,
+  fallbackName: string,
+  fallbackSide: string,
+): PlayerState {
+  // 中文注释：友方与玩家共用角色型动作菜单；缺失字段只补 UI 所需的空集合。
+  return {
+    id: normalizeText(participant.id) || fallbackId,
+    name: normalizeText(participant.name) || fallbackName,
+    role_class: normalizeText(participant.role_class),
+    level: toNumber(participant.level) || 1,
+    hp: toNumber(participant.hp),
+    max_hp: Math.max(1, toNumber(participant.max_hp)),
+    temp_hp: toNumber(participant.temp_hp),
+    ac: toNumber(participant.ac) || toNumber(participant.base_ac) || 10,
+    base_ac: toNumber(participant.base_ac) || undefined,
+    abilities: isRecord(participant.abilities) ? participant.abilities as Record<string, number> : {},
+    modifiers: isRecord(participant.modifiers) ? participant.modifiers as Record<string, number> : {},
+    conditions: Array.isArray(participant.conditions) ? participant.conditions : [],
+    resources: isRecord(participant.resources) ? participant.resources as Record<string, number> : {},
+    weapons: Array.isArray(participant.weapons) ? participant.weapons : [],
+    coins: isRecord(participant.coins) ? participant.coins as Record<string, number> : undefined,
+    inventory: Array.isArray(participant.inventory) ? participant.inventory : [],
+    known_spells: Array.isArray(participant.known_spells) ? participant.known_spells : [],
+    known_cantrips: Array.isArray(participant.known_cantrips) ? participant.known_cantrips : [],
+    spellcasting_ability: normalizeText(participant.spellcasting_ability),
+    concentrating_on: typeof participant.concentrating_on === 'string' ? participant.concentrating_on : null,
+    xp: typeof participant.xp === 'number' ? participant.xp : undefined,
+    class_features: Array.isArray(participant.class_features) || isRecord(participant.class_features)
+      ? participant.class_features
+      : [],
+    arcane_tradition: normalizeText(participant.arcane_tradition) || undefined,
+    speed: toNumber(participant.speed) || undefined,
+    movement_left: toNumber(participant.movement_left),
+    action_available: participant.action_available !== false,
+    extra_action_available: participant.extra_action_available === true,
+    bonus_action_available: participant.bonus_action_available !== false,
+    reaction_available: participant.reaction_available !== false,
+    side: fallbackSide,
+  } as PlayerState & { side: string }
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 </script>
 
