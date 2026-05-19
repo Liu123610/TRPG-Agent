@@ -308,7 +308,7 @@ def _space_dict(value: SpaceState | dict | None) -> dict:
 
 
 def _merge_space_placements(left: dict, right: dict) -> dict:
-    """并发新增取并集；纯删除或移动取右侧快照，保留 remove_unit/end_combat 语义。"""
+    """并发新增取并集；纯删除或移动取右侧快照，保留空间清理与 end_combat 语义。"""
     left_keys = set(left)
     right_keys = set(right)
     if right_keys <= left_keys:

@@ -15,7 +15,7 @@ from app.allies.profiles import get_ally_profile
 from app.calculation.predefined_characters import PREDEFINED_CHARACTERS
 from app.services.tools import get_tool_profile
 from app.services.tools.character_tools import load_character_profile
-from app.services.tools.item_tools import buy_item, use_item
+from app.services.tools.item_tools import manage_inventory
 from app.services.tools.rest_tools import take_rest
 from app.services.tools._helpers import prepare_player_for_combat
 
@@ -28,6 +28,11 @@ def _invoke_tool(tool_func, *, tool_input: dict) -> object:
         "id": "item-test-call",
         "type": "tool_call",
     })
+
+
+def _manage_inventory(tool_input: dict) -> object:
+    """测试统一走当前模型可见的背包入口。"""
+    return _invoke_tool(manage_inventory, tool_input=tool_input)
 
 
 def _space_state(unit_positions: dict[str, tuple[int, int]]) -> dict:
@@ -62,8 +67,8 @@ def test_drinking_healing_potion_uses_bonus_action_in_combat():
 
     with patch("app.services.tools.item_tools.d20.roll", return_value=d20.roll("6")):
         result = _invoke_tool(
-            use_item,
-            tool_input={"item_id": "potion_of_healing", "actor_id": "player", "target_id": "player", "mode": "drink", "state": {"player": player, "combat": combat}},
+            manage_inventory,
+            tool_input={"action": "use", "item_id": "potion_of_healing", "actor_id": "player", "target_id": "player", "mode": "drink", "state": {"player": player, "combat": combat}},
         )
 
     updated = result.update["player"]
@@ -95,8 +100,8 @@ def test_ally_drink_without_target_uses_actor_as_target():
 
     with patch("app.services.tools.item_tools.d20.roll", return_value=d20.roll("5")):
         result = _invoke_tool(
-            use_item,
-            tool_input={"item_id": "potion_of_healing", "actor_id": "fighter_companion", "mode": "drink", "state": state},
+            manage_inventory,
+            tool_input={"action": "use", "item_id": "potion_of_healing", "actor_id": "fighter_companion", "mode": "drink", "state": state},
         )
 
     updated_ally = result.update["combat"]["participants"]["fighter_companion"]
@@ -121,8 +126,9 @@ def test_drink_rejects_targeting_other_unit_at_any_distance():
     }
 
     result = _invoke_tool(
-        use_item,
+        manage_inventory,
         tool_input={
+            "action": "use",
             "item_id": "potion_of_healing",
             "actor_id": "fighter_companion",
             "target_id": "player",
@@ -157,8 +163,8 @@ def test_use_item_player_alias_resolves_to_real_player_id_for_range():
 
     with patch("app.services.tools.item_tools.d20.roll", return_value=d20.roll("5")):
         result = _invoke_tool(
-            use_item,
-            tool_input={"item_id": "potion_of_healing", "actor_id": "player", "target_id": "fighter_companion", "mode": "feed", "state": state},
+            manage_inventory,
+            tool_input={"action": "use", "item_id": "potion_of_healing", "actor_id": "player", "target_id": "fighter_companion", "mode": "feed", "state": state},
         ).update
 
     assert result["player"]["id"] == "温良"
@@ -180,8 +186,8 @@ def test_greater_healing_potion_restores_4d4_plus_4_hp():
 
     with patch("app.services.tools.item_tools.d20.roll", return_value=d20.roll("12")) as roll_mock:
         result = _invoke_tool(
-            use_item,
-            tool_input={"item_id": "potion_of_greater_healing", "state": {"player": player}},
+            manage_inventory,
+            tool_input={"action": "use", "item_id": "potion_of_greater_healing", "state": {"player": player}},
         )
 
     roll_mock.assert_called_once_with("4d4+4")
@@ -209,16 +215,16 @@ def test_throwing_healing_potion_uses_action_and_has_range_limit():
     }
 
     blocked = _invoke_tool(
-        use_item,
-        tool_input={"item_id": "potion_of_healing", "actor_id": "player", "target_id": "fighter_companion", "mode": "throw", "state": state},
+        manage_inventory,
+        tool_input={"action": "use", "item_id": "potion_of_healing", "actor_id": "player", "target_id": "fighter_companion", "mode": "throw", "state": state},
     )
     assert "距离不足" in blocked.update["messages"][0].content
 
     state["space"] = _space_state({"温良": (0, 0), "fighter_companion": (20, 0)})
     with patch("app.services.tools.item_tools.d20.roll", return_value=d20.roll("5")):
         result = _invoke_tool(
-            use_item,
-            tool_input={"item_id": "potion_of_healing", "actor_id": "player", "target_id": "fighter_companion", "mode": "throw", "state": state},
+            manage_inventory,
+            tool_input={"action": "use", "item_id": "potion_of_healing", "actor_id": "player", "target_id": "fighter_companion", "mode": "throw", "state": state},
         )
 
     assert result.update["player"]["action_available"] is False
@@ -233,8 +239,8 @@ def test_invisibility_potion_adds_breaking_invisible_condition():
     player.update({"name": "温良", "id": "温良"})
 
     result = _invoke_tool(
-        use_item,
-        tool_input={"item_id": "potion_of_invisibility", "state": {"player": {**player, "inventory": [{"id": "potion_of_invisibility", "name": "隐身药水", "type": "potion", "quantity": 1}]}}},
+        manage_inventory,
+        tool_input={"action": "use", "item_id": "potion_of_invisibility", "state": {"player": {**player, "inventory": [{"id": "potion_of_invisibility", "name": "隐身药水", "type": "potion", "quantity": 1}]}}},
     )
 
     condition = result.update["player"]["conditions"][0]
@@ -253,7 +259,7 @@ def test_vitality_potion_clears_exhaustion_poison_and_disease():
         "conditions": [{"id": "exhausted"}, {"id": "poisoned"}, {"id": "diseased"}, {"id": "prone"}],
     })
 
-    result = _invoke_tool(use_item, tool_input={"item_id": "potion_of_vitality", "state": {"player": player}})
+    result = _invoke_tool(manage_inventory, tool_input={"action": "use", "item_id": "potion_of_vitality", "state": {"player": player}})
 
     remaining = [condition["id"] for condition in result.update["player"]["conditions"]]
     assert remaining == ["prone"]
@@ -290,8 +296,8 @@ def test_buy_item_spends_gp_and_stacks_inventory():
     }
 
     result = _invoke_tool(
-        buy_item,
-        tool_input={"item_id": "potion_of_healing", "quantity": 2, "state": {"player": player}},
+        manage_inventory,
+        tool_input={"action": "buy", "item_id": "potion_of_healing", "quantity": 2, "state": {"player": player}},
     )
 
     updated = result.update["player"]
@@ -299,7 +305,7 @@ def test_buy_item_spends_gp_and_stacks_inventory():
     assert updated["inventory"][0]["id"] == "potion_of_healing"
     assert updated["inventory"][0]["quantity"] == 3
     message = result.update["messages"][0]
-    assert message.name == "buy_item"
+    assert message.name == "manage_inventory"
     assert "[商店待售清单]" not in message.content
     assert "购物完成" in message.content
 
@@ -308,11 +314,11 @@ def test_buy_item_without_item_id_returns_catalog_without_purchase():
     """不传 item_id 时只查看价目表，不扣钱也不改背包。"""
     player = {"name": "温良", "id": "温良", "coins": {"gp": 125}, "inventory": []}
 
-    result = _invoke_tool(buy_item, tool_input={"state": {"player": player}})
+    result = _invoke_tool(manage_inventory, tool_input={"action": "list_shop", "state": {"player": player}})
 
     assert "player" not in result.update
     message = result.update["messages"][0]
-    assert message.name == "buy_item"
+    assert message.name == "manage_inventory"
     assert "[商店待售清单]" in message.content
     assert "potion_of_healing" in message.content
     assert "50 gp" in message.content
@@ -327,8 +333,8 @@ def test_buy_greater_healing_potion_uses_uncommon_consumable_price():
     player = {"name": "温良", "id": "温良", "coins": {"gp": 250}, "inventory": []}
 
     result = _invoke_tool(
-        buy_item,
-        tool_input={"item_id": "potion_of_greater_healing", "state": {"player": player}},
+        manage_inventory,
+        tool_input={"action": "buy", "item_id": "potion_of_greater_healing", "state": {"player": player}},
     )
 
     updated = result.update["player"]
@@ -342,8 +348,8 @@ def test_buy_item_rejects_insufficient_gp_without_mutating_player():
     player = {"name": "温良", "id": "温良", "coins": {"gp": 49}, "inventory": []}
 
     result = _invoke_tool(
-        buy_item,
-        tool_input={"item_id": "potion_of_healing", "state": {"player": player}},
+        manage_inventory,
+        tool_input={"action": "buy", "item_id": "potion_of_healing", "state": {"player": player}},
     )
 
     assert "GP 不足" in result.update["messages"][0].content
@@ -353,10 +359,45 @@ def test_buy_item_rejects_insufficient_gp_without_mutating_player():
     assert player["inventory"] == []
 
 
-def test_buy_item_is_narrative_only_tool():
-    """购物只在叙事阶段开放，避免战斗工具面板混入交易能力。"""
+def test_manage_inventory_is_narrative_and_combat_executor_tool():
+    """主 Agent 只在叙事阶段管理背包；战斗使用由执行器窄上下文处理。"""
     narrative_tool_names = {tool.name for tool in get_tool_profile("narrative")}
     combat_tool_names = {tool.name for tool in get_tool_profile("combat")}
 
-    assert "buy_item" in narrative_tool_names
-    assert "buy_item" not in combat_tool_names
+    assert "manage_inventory" in narrative_tool_names
+    assert "manage_inventory" not in combat_tool_names
+    assert "buy_item" not in narrative_tool_names
+    assert "use_item" not in narrative_tool_names
+
+
+def test_add_item_records_story_pickup_without_spending_gp():
+    """剧情拾取和赠予可以直接加入已定义消耗品，但不伪装成购物或节点奖励。"""
+    player = {"name": "温良", "id": "温良", "coins": {"gp": 0}, "inventory": []}
+
+    result = _manage_inventory({
+        "action": "add",
+        "item_id": "potion_of_healing",
+        "quantity": 2,
+        "reason": "药剂师临时赠予的旅途补给",
+        "state": {"player": player},
+    })
+
+    updated = result.update["player"]
+    assert updated["coins"]["gp"] == 0
+    assert updated["inventory"][0]["id"] == "potion_of_healing"
+    assert updated["inventory"][0]["quantity"] == 2
+    assert "药剂师临时赠予" in result.update["messages"][0].content
+
+
+def test_add_item_requires_reason_to_keep_node_rewards_separate():
+    """没有剧情来源时拒绝 add，避免替代 claim_adventure_reward。"""
+    player = {"name": "温良", "id": "温良", "inventory": []}
+
+    result = _manage_inventory({
+        "action": "add",
+        "item_id": "potion_of_healing",
+        "state": {"player": player},
+    })
+
+    assert "claim_adventure_reward" in result.update["messages"][0].content
+    assert "player" not in result.update

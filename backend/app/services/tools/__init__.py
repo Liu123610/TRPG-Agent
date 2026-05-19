@@ -23,31 +23,17 @@ from app.services.tools.combat_tools import (
     prepare_combat_start,
     start_combat,
 )
-from app.services.tools.item_tools import buy_item, use_item
+from app.services.tools.item_tools import manage_inventory
 from app.services.tools.spell_tools import cast_spell
 from app.services.tools.rag_tools import consult_rules_handbook
 from app.services.tools.rest_tools import take_rest
 from app.services.tools.space_tools import (
-    create_plane_map,
     manage_space,
-    measure_distance,
-    move_unit,
-    remove_unit,
-    place_unit,
-    query_units_in_radius,
 )
 from app.services.tools.monster_action_tools import use_monster_action
 from app.services.tools.class_action_tools import use_class_action
 from app.services.tools.adventure_tools import (
-    advance_adventure,
     claim_adventure_reward,
-    inspect_adventure_state,
-    load_adventure_node,
-    manage_adventure,
-    mark_adventure_event,
-    reveal_adventure_clue,
-    search_adventure_nodes,
-    switch_adventure_node,
 )
 
 # 供外部模块直接引用的战斗计算函数
@@ -77,8 +63,7 @@ _NARRATIVE_TOOLS: tuple[BaseTool, ...] = (
     manage_scene_units,
     prepare_combat_start,
     cast_spell,
-    use_item,
-    buy_item,
+    manage_inventory,
     use_class_action,
     inspect_unit,
     consult_rules_handbook,
@@ -99,35 +84,21 @@ _COMBAT_TOOLS: tuple[BaseTool, ...] = (
     manage_space,
 )
 
-_COMPATIBILITY_TOOLS: tuple[BaseTool, ...] = (
+_RUNTIME_ONLY_TOOLS: tuple[BaseTool, ...] = (
     start_combat,
     end_combat,
     attack_action,
     use_monster_action,
-    manage_adventure,
-    inspect_adventure_state,
-    load_adventure_node,
-    search_adventure_nodes,
-    switch_adventure_node,
-    reveal_adventure_clue,
-    mark_adventure_event,
-    advance_adventure,
-    create_plane_map,
-    place_unit,
-    move_unit,
-    remove_unit,
-    measure_distance,
-    query_units_in_radius,
 )
 
 _ALL_TOOLS: tuple[BaseTool, ...] = _NARRATIVE_TOOLS + tuple(
     tool for tool in _COMBAT_TOOLS if tool not in _NARRATIVE_TOOLS
 ) + tuple(
-    tool for tool in _COMPATIBILITY_TOOLS if tool not in _NARRATIVE_TOOLS and tool not in _COMBAT_TOOLS
+    tool for tool in _RUNTIME_ONLY_TOOLS if tool not in _NARRATIVE_TOOLS and tool not in _COMBAT_TOOLS
 )
 
 
-# 模型只看 profile，ToolNode 仍保留全量工具以执行历史调用。
+# 模型只看 profile，ToolNode 额外保留 workflow/执行器仍会落到的底层战斗工具。
 @lru_cache(maxsize=None)
 def get_tool_profile(profile: ToolProfile) -> list[BaseTool]:
     if profile == "narrative":

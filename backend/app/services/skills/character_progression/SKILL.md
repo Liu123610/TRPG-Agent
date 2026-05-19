@@ -4,7 +4,7 @@
 
 ## 入口工具
 
-统一使用 `modify_character_state`。不要调用旧的 `grant_xp`、`level_up`、`choose_arcane_tradition`、`choose_fighter_archetype`；这些只保留给历史调用兼容。
+统一使用 `modify_character_state`，角色成长不再提供独立旧工具入口。
 
 如需重新查看本说明，调用 `modify_character_state(action="help", payload={"topic": "progression"})`。
 
@@ -20,7 +20,7 @@
 
 - `target_id="player"` 表示当前玩家角色。
 - `target_id` 也可以是 `scene_units` 或 `combat.participants` 中的友方角色 ID，例如 `fighter_companion`、`sildar`、`apprentice_wizard`。
-- 友方角色可以使用 `grant_xp`、`level_up`、`choose_fighter_archetype`、`choose_arcane_tradition` 和 `choose_feat`。
+- 友方角色可以使用 `modify_character_state` 的 `grant_xp`、`level_up`、`choose_fighter_archetype`、`choose_arcane_tradition` 和 `choose_feat` 动作。
 - 对友方成长时，必须显式传 `target_id=该友方ID`；不要因为目标不是玩家就放弃调用工具。
 - 普通怪物或敌方单位不是角色型成长目标；工具会拒绝这类目标。
 

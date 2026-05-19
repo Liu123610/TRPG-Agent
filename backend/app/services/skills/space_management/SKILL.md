@@ -4,7 +4,7 @@
 
 ## 入口工具
 
-统一使用 `manage_space`。不要直接调用旧的 `create_plane_map`、`switch_plane_map`、`place_unit`、`move_unit`、`remove_unit`、`measure_distance`、`query_units_in_radius`；这些只保留给历史调用兼容。
+统一使用 `manage_space`，空间系统不再提供独立旧工具入口。
 
 ## 动作速查
 

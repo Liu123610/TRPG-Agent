@@ -473,7 +473,7 @@ def _get_combat_executor_tools() -> tuple:
     from app.services.tools.character_tools import inspect_unit
     from app.services.tools.class_action_tools import use_class_action
     from app.services.tools.combat_tools import attack_action
-    from app.services.tools.item_tools import use_item
+    from app.services.tools.item_tools import manage_inventory
     from app.services.tools.monster_action_tools import use_monster_action
     from app.services.tools.space_tools import manage_space
     from app.services.tools.spell_tools import cast_spell
@@ -484,7 +484,7 @@ def _get_combat_executor_tools() -> tuple:
         attack_action,
         cast_spell,
         use_class_action,
-        use_item,
+        manage_inventory,
         inspect_unit,
     )
 
