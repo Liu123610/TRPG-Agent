@@ -21,6 +21,9 @@ export interface AvailabilitySelectionUnit {
   x: number
   y: number
   hp?: number
+  maxHp?: number
+  ac?: number
+  conditions?: string[]
   isDead?: boolean
 }
 

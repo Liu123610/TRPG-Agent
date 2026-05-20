@@ -7,8 +7,7 @@
       :scene-units="sceneUnits"
       :selected-unit="selectedUnit"
       :action-sheet-request-id="actionSheetRequestId"
-      :send-combat-action-request="sendCombatActionRequest"
-      :end-combat-turn-request="endCombatTurnRequest"
+      :request-combat-action-panel="requestCombatActionPanel"
       @action-notice="handleActionNotice"
     />
   </aside>
@@ -26,8 +25,7 @@ const props = defineProps<{
   sceneUnits?: Record<string, any> | null
   selectedUnit: AvailabilitySelectionUnit | null
   actionSheetRequestId?: number
-  sendCombatActionRequest?: ((message: string) => Promise<void>) | null
-  endCombatTurnRequest?: ((actorId: string) => Promise<void>) | null
+  requestCombatActionPanel?: ((preferredTarget?: AvailabilitySelectionUnit | null) => void) | null
   isCollapsed?: boolean
 }>()
 
