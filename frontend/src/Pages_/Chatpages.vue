@@ -107,6 +107,8 @@
         :dead-units="deadUnitsState"
         :active-ally-id="activeCombatAllyId"
         :send-tactical-move-request="sendTacticalMoveRequest"
+        :send-combat-action-request="sendTextMessage"
+        :end-combat-turn-request="endCombatTurn"
         @selected-unit-change="handleSelectedUnitChange"
         @request-action-sheet="handleRequestActionSheet"
         @action-notice="handleActionNotice"
@@ -384,6 +386,10 @@ watch(
           sceneUnits,
           selectedUnit: target,
           actionSheetRequestId: requestId,
+          requestCombatActionPanel: (preferredTarget) => {
+            if (preferredTarget) selectedUnit.value = preferredTarget
+            characterSidebarRef.value?.openCombatActionPanel(preferredTarget ?? undefined)
+          },
           sendCombatActionRequest: sendTextMessage,
           endCombatTurnRequest: endCombatTurn,
           onActionNotice: handleActionNotice,
@@ -501,6 +507,7 @@ const handleSelectedUnitChange = (unit: AvailabilitySelectionUnit | null) => {
 const handleRequestActionSheet = (unit: AvailabilitySelectionUnit) => {
   selectedUnit.value = unit
   combatActionSheetRequestId.value += 1
+  characterSidebarRef.value?.openCombatActionPanel(unit)
   overrideLeftRailMode('combat')
 }
 
