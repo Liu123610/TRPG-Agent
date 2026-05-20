@@ -66,6 +66,7 @@
         :dead-units="deadUnits"
         :send-tactical-move-request="sendTacticalMoveRequest"
         @selected-unit-change="handleSelectedUnitChange"
+        @request-action-sheet="handleRequestActionSheet"
       />
 
       <CharacterPanel
@@ -104,6 +105,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   selectedUnitChange: [unit: AvailabilitySelectionUnit | null]
+  requestActionSheet: [unit: AvailabilitySelectionUnit]
 }>()
 
 const panelOrder: SidebarPanelMode[] = ['character', 'inventory']
@@ -158,6 +160,11 @@ const selectSubject = (subjectId: string) => {
 const handleSelectedUnitChange = (unit: AvailabilitySelectionUnit | null) => {
   selectedUnit.value = unit
   emit('selectedUnitChange', unit)
+}
+
+// 中文注释：地图只上抛“请打开战斗动作面板”的意图，避免侧栏知道双击规则细节。
+const handleRequestActionSheet = (unit: AvailabilitySelectionUnit) => {
+  emit('requestActionSheet', unit)
 }
 
 const toggleLeftRailMode = () => {

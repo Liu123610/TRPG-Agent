@@ -4,18 +4,48 @@
       <div v-if="open" class="combat-sheet-overlay" @click.self="emit('close')">
         <div class="combat-sheet">
           <div class="sheet-header">
-            <div>
-              <div class="sheet-eyebrow">当前行动</div>
-              <h4 class="sheet-title">{{ actorName }} 的动作选择</h4>
+            <div class="sheet-heading">
+              <button
+                v-if="pendingTargetItem"
+                type="button"
+                class="sheet-back"
+                @click="resetTargetPicker"
+              >
+                ← 返回
+              </button>
+              <div class="sheet-eyebrow">{{ pendingTargetItem ? '选择目标' : '当前行动' }}</div>
+              <h4 class="sheet-title">{{ pendingTargetItem ? buildTargetTitle(pendingTargetItem) : `${actorName} 的动作选择` }}</h4>
             </div>
-            <button class="sheet-close" type="button" @click="emit('close')">×</button>
           </div>
 
-          <div v-if="selectedTargetName" class="sheet-target">
+          <div v-if="selectedTargetName && !pendingTargetItem" class="sheet-target">
             当前目标：<strong>{{ selectedTargetName }}</strong>
           </div>
 
-          <div class="sheet-groups">
+          <div v-if="pendingTargetItem" class="sheet-groups">
+            <section class="sheet-group">
+              <div class="group-title">攻击对象</div>
+              <div v-if="targetOptions.length" class="group-list">
+                <button
+                  v-for="target in targetOptions"
+                  :key="target.id"
+                  type="button"
+                  class="action-item target-item"
+                  :class="`accent-${pendingTargetItem.accent}`"
+                  @click="handleTargetClick(target)"
+                >
+                  <span class="item-main">
+                    <span class="item-label">{{ target.name }}</span>
+                    <span class="item-detail">{{ resolveTargetDetail(target) }}</span>
+                  </span>
+                  <span class="item-state item-ready">攻击</span>
+                </button>
+              </div>
+              <div v-else class="group-empty">当前没有可攻击目标。</div>
+            </section>
+          </div>
+
+          <div v-else class="sheet-groups">
             <section v-for="group in groups" :key="group.id" class="sheet-group">
               <div class="group-title">{{ group.title }}</div>
               <div v-if="group.items.length" class="group-list">
@@ -56,22 +86,50 @@
 </template>
 
 <script setup lang="ts">
+import { ref, watch } from 'vue'
 import type { CombatActionMenuGroup, CombatActionMenuItem } from '../../../Services_/combatActionCatalog'
 
-const props = defineProps<{
+type CombatTargetOption = {
+  id: string
+  name: string
+  side: string
+  hp: number
+  maxHp: number
+}
+
+const props = withDefaults(defineProps<{
   open: boolean
   actorName: string
   groups: CombatActionMenuGroup[]
   selectedTargetName?: string
   disabledEndTurn?: boolean
-}>()
+  preferredTarget?: CombatTargetOption | null
+  targetOptions?: CombatTargetOption[]
+}>(), {
+  selectedTargetName: '',
+  disabledEndTurn: false,
+  preferredTarget: null,
+  targetOptions: () => [],
+})
 
 const emit = defineEmits<{
   close: []
   submit: [item: CombatActionMenuItem]
+  submitWithTarget: [payload: { item: CombatActionMenuItem; target: CombatTargetOption }]
   blocked: [reason: string]
   endTurn: []
 }>()
+
+const pendingTargetItem = ref<CombatActionMenuItem | null>(null)
+
+watch(
+  () => props.open,
+  (open) => {
+    if (!open) {
+      pendingTargetItem.value = null
+    }
+  },
+)
 
 /**
  * 中文注释：动作面板只分流“可提交”和“不可提交”，具体规则仍以后端裁定为准。
@@ -81,7 +139,38 @@ const handleItemClick = (item: CombatActionMenuItem) => {
     emit('blocked', item.disabledReason)
     return
   }
+
+  // 中文注释：若本次弹窗来自地图双击敌人，则敌方目标已明确，点击攻击动作后直接提交。
+  if (props.preferredTarget && item.targetMode === 'enemy') {
+    emit('submit', item)
+    return
+  }
+
+  if (item.accent === 'weapon') {
+    pendingTargetItem.value = item
+    return
+  }
+
   emit('submit', item)
+}
+
+const handleTargetClick = (target: CombatTargetOption) => {
+  if (!pendingTargetItem.value) return
+  emit('submitWithTarget', { item: pendingTargetItem.value, target })
+  pendingTargetItem.value = null
+}
+
+const resetTargetPicker = () => {
+  pendingTargetItem.value = null
+}
+
+function buildTargetTitle(item: CombatActionMenuItem): string {
+  return `选择 ${item.label} 的攻击对象`
+}
+
+function resolveTargetDetail(target: CombatTargetOption): string {
+  const sideLabel = target.side === 'enemy' ? '敌方' : target.side === 'ally' ? '友方' : '单位'
+  return `${sideLabel} · HP ${target.hp} / ${target.maxHp}`
 }
 </script>
 
@@ -91,26 +180,26 @@ const handleItemClick = (item: CombatActionMenuItem) => {
   inset: 0;
   z-index: 10010;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: center;
-  background: rgba(6, 8, 11, 0.58);
-  backdrop-filter: blur(10px);
-  padding: 20px;
+  background: rgba(6, 8, 11, 0.64);
+  backdrop-filter: blur(12px);
+  padding: 28px;
 }
 
 .combat-sheet {
-  width: min(720px, 100%);
-  max-height: min(82vh, 920px);
+  width: min(780px, 100%);
+  max-height: min(84vh, 920px);
   overflow: auto;
   -ms-overflow-style: none;
   scrollbar-width: none;
-  border-radius: 24px 24px 18px 18px;
+  border-radius: 28px;
   background:
-    linear-gradient(180deg, rgba(23, 24, 30, 0.98) 0%, rgba(12, 13, 18, 0.98) 100%);
-  border: 1px solid rgba(223, 190, 128, 0.18);
+    linear-gradient(180deg, rgba(24, 25, 33, 0.99) 0%, rgba(12, 13, 18, 0.99) 100%);
+  border: 1px solid rgba(223, 190, 128, 0.2);
   box-shadow:
-    0 24px 60px rgba(0, 0, 0, 0.42),
-    0 0 0 1px rgba(255, 244, 214, 0.04) inset;
+    0 30px 80px rgba(0, 0, 0, 0.48),
+    0 0 0 1px rgba(255, 244, 214, 0.05) inset;
   color: #f5efe4;
 }
 
@@ -123,9 +212,16 @@ const handleItemClick = (item: CombatActionMenuItem) => {
 .sheet-header {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
   align-items: flex-start;
-  padding: 20px 22px 12px;
+  padding: 24px 24px 14px;
+}
+
+.sheet-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
 }
 
 .sheet-eyebrow {
@@ -136,28 +232,30 @@ const handleItemClick = (item: CombatActionMenuItem) => {
 }
 
 .sheet-title {
-  margin: 4px 0 0;
-  font-size: 22px;
-  font-weight: 600;
+  margin: 0;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.15;
 }
 
-.sheet-close {
-  width: 36px;
-  height: 36px;
-  border: none;
+.sheet-back {
+  width: fit-content;
+  padding: 7px 12px;
+  border: 1px solid rgba(214, 182, 126, 0.24);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #d8d2c5;
-  font-size: 22px;
+  background: rgba(214, 182, 126, 0.1);
+  color: #f0d8aa;
+  font-size: 13px;
+  font-weight: 700;
   cursor: pointer;
 }
 
 .sheet-target {
-  margin: 0 22px 16px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: rgba(201, 168, 123, 0.08);
-  border: 1px solid rgba(201, 168, 123, 0.14);
+  margin: 0 24px 18px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(201, 168, 123, 0.09);
+  border: 1px solid rgba(201, 168, 123, 0.16);
   color: #dbc9ab;
   font-size: 13px;
 }
@@ -165,43 +263,47 @@ const handleItemClick = (item: CombatActionMenuItem) => {
 .sheet-groups {
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  padding: 0 22px 16px;
+  gap: 20px;
+  padding: 0 24px 18px;
 }
 
 .sheet-group {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .group-title {
   color: #cfb284;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
 }
 
 .group-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .action-item {
   display: flex;
   justify-content: space-between;
-  gap: 14px;
+  gap: 16px;
   align-items: center;
   width: 100%;
-  padding: 14px 16px;
-  border-radius: 16px;
+  padding: 16px 18px;
+  border-radius: 18px;
   border: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(255, 255, 255, 0.04);
   color: inherit;
   text-align: left;
   cursor: pointer;
   transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.target-item {
+  align-items: center;
 }
 
 .action-item:hover {
@@ -221,19 +323,19 @@ const handleItemClick = (item: CombatActionMenuItem) => {
 }
 
 .item-label {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
 }
 
 .item-detail {
   color: #9fa4b3;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .item-state {
   max-width: 220px;
   color: #f5c7c7;
-  font-size: 12px;
+  font-size: 13px;
   text-align: right;
 }
 
@@ -262,8 +364,8 @@ const handleItemClick = (item: CombatActionMenuItem) => {
 }
 
 .group-empty {
-  padding: 14px 16px;
-  border-radius: 16px;
+  padding: 16px 18px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.03);
   color: #898f9d;
   font-size: 13px;
@@ -273,7 +375,7 @@ const handleItemClick = (item: CombatActionMenuItem) => {
   position: sticky;
   bottom: 0;
   z-index: 2;
-  padding: 14px 22px 22px;
+  padding: 16px 24px 24px;
   background:
     linear-gradient(180deg, rgba(12, 13, 18, 0) 0%, rgba(12, 13, 18, 0.86) 24%, rgba(12, 13, 18, 0.98) 100%);
   backdrop-filter: blur(8px);
@@ -281,9 +383,9 @@ const handleItemClick = (item: CombatActionMenuItem) => {
 
 .end-turn-btn {
   width: 100%;
-  min-height: 52px;
+  min-height: 56px;
   border: 1px solid rgba(239, 68, 68, 0.28);
-  border-radius: 16px;
+  border-radius: 18px;
   background:
     linear-gradient(135deg, rgba(127, 29, 29, 0.96) 0%, rgba(69, 10, 10, 0.98) 100%);
   box-shadow:

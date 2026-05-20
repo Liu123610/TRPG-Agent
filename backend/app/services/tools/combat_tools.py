@@ -448,12 +448,15 @@ def delegate_combat_turn(
     tool_call_id: Annotated[str, InjectedToolCallId] = None,
 ) -> Command:
     """把当前行动者的本回合交给战斗执行器。
-    主 Agent 只需描述战术意图；执行器会用精简战斗上下文调用移动/攻击/施法等工具，
-    并返回完整工具轨迹、前端战斗事件和是否建议结束回合。
+    主 Agent 只需把玩家最新输入与自己的战术裁定写进 instruction；执行器会用精简战斗上下文
+    调用移动、攻击、施法、职业动作、物品和怪物动作等窄工具，并返回完整工具轨迹、
+    前端战斗事件和是否建议结束回合。玩家、友方和怪物回合都优先通过这个入口落子，
+    以保持主 Agent 在战斗阶段看到的工具集合稳定。
 
     Args:
         actor_id: 当前行动者 ID，必须等于 combat.current_actor_id。
-        instruction: 本回合战术意图，例如“保持距离用短弓攻击玩家，若射程不足先靠近”。
+        instruction: 本回合战术意图；玩家回合应包含玩家原话和你的裁定，例如
+            “玩家说：我攻击最近的地精。裁定：player_hero 用长剑攻击 goblin_1；若距离不足先靠近。”。
     """
     return Command(update={
         "pending_combat_executor": {

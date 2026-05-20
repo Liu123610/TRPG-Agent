@@ -27,6 +27,7 @@
       :space="leftRailState.combat?.space ?? null"
       :scene-units="leftRailState.combat?.sceneUnits ?? null"
       :selected-unit="leftRailState.combat?.selectedUnit ?? null"
+      :action-sheet-request-id="leftRailState.combat?.actionSheetRequestId ?? 0"
       :send-combat-action-request="leftRailState.combat?.sendCombatActionRequest ?? null"
       :end-combat-turn-request="leftRailState.combat?.endCombatTurnRequest ?? null"
       :is-collapsed="isCollapsed"

@@ -566,6 +566,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   selectedUnitChange: [unit: SelectedUnitPayload | null]
+  requestActionSheet: [unit: SelectedUnitPayload]
 }>()
 
 const selectedUnitId = ref<string | null>(null)
@@ -805,6 +806,10 @@ const playerVisibleUnit = computed(() => {
 const currentCombatActorId = computed(() => {
   if (!isRecord(props.combat)) return ''
   return toLabelText(props.combat.current_actor_id, '')
+})
+
+const isPlayerCombatTurn = computed(() => {
+  return isCombatActive.value && currentCombatActorId.value === playerUnitId.value
 })
 
 // 复活、切图或收尾后前端可能暂时残留空 combat 对象；只有存在当前回合或参战单位时才视为真正战斗中
@@ -1236,8 +1241,27 @@ const handleUnitClick = (unitId: string) => {
 
 const handleUnitDoubleClick = (unitId: string) => {
   selectedUnitId.value = unitId
-  if (unitId !== playerUnitId.value || !canEnterMoveMode.value) return
-  toggleMoveMode()
+
+  if (unitId === playerUnitId.value && canEnterMoveMode.value) {
+    toggleMoveMode()
+    return
+  }
+
+  if (!isPlayerCombatTurn.value) return
+
+  const unit = visibleUnits.value.find((item) => item.id === unitId)
+  if (!unit || unit.side !== 'enemy') return
+
+  // 中文注释：双击敌人只负责把“开战斗动作面板”这一意图上抛，具体动作仍由左侧战斗栏裁定。
+  emit('requestActionSheet', {
+    id: unit.id,
+    name: unit.name,
+    side: unit.side,
+    x: unit.x,
+    y: unit.y,
+    hp: unit.hp,
+    isDead: unit.isDead,
+  })
 }
 
 const getMapPointFromMouse = (event: MouseEvent, surface: 'inline' | 'detached' = 'inline') => {

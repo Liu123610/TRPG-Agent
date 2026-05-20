@@ -38,7 +38,7 @@ const outcomeText = computed(() => isSuccess.value ? 'SUCCESS' : 'FAILURE')
 </script>
 
 <style scoped>
-@import url('https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700&family=Cormorant+SC:wght@700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=UnifrakturMaguntia&family=MedievalSharp&family=Germania+One&display=swap');
 
 .dice-roll-wrapper {
   padding: 16px 0;
@@ -60,15 +60,6 @@ const outcomeText = computed(() => isSuccess.value ? 'SUCCESS' : 'FAILURE')
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42), inset 0 0 0 1px rgba(245, 210, 120, 0.16);
   color: #f8edc0;
   font-family: 'Cinzel', 'Georgia', serif;
-}
-
-.dice-roll-card::before {
-  content: '';
-  position: absolute;
-  inset: 14px;
-  border: 1px solid rgba(196, 146, 58, 0.38);
-  border-radius: 5px;
-  pointer-events: none;
 }
 
 .dice-stage {
@@ -103,13 +94,16 @@ const outcomeText = computed(() => isSuccess.value ? 'SUCCESS' : 'FAILURE')
   align-items: center;
   justify-content: center;
   gap: 12px;
-  font-family: 'Cinzel Decorative', 'Cormorant SC', 'Cinzel', 'Georgia', serif;
+  font-family: 'Cinzel', 'UnifrakturMaguntia', 'MedievalSharp', 'Germania One', serif;
   font-size: 34px;
   font-weight: 700;
   line-height: 1;
   text-align: center;
   letter-spacing: 0.14em;
   text-transform: uppercase;
+  opacity: 0;
+  transform: translateY(14px);
+  animation: outcomeReveal 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.18s forwards;
   text-shadow:
     0 0 10px rgba(0, 0, 0, 0.34),
     0 0 22px rgba(255, 227, 154, 0.12);
@@ -117,19 +111,15 @@ const outcomeText = computed(() => isSuccess.value ? 'SUCCESS' : 'FAILURE')
 
 .roll-outcome::before,
 .roll-outcome::after {
-  content: '✦';
-  font-family: 'Cormorant SC', 'Cinzel', serif;
-  font-size: 18px;
-  line-height: 1;
-  opacity: 0.9;
+  content: none;
 }
 
 .success .roll-outcome {
-  color: #a7f3b8;
+  color: #e5d4a8;
   text-shadow:
-    0 0 10px rgba(24, 66, 42, 0.44),
-    0 0 18px rgba(103, 232, 149, 0.2),
-    0 0 34px rgba(253, 230, 138, 0.12);
+    0 0 10px rgba(0, 0, 0, 0.42),
+    0 0 18px rgba(184, 138, 68, 0.18),
+    0 0 30px rgba(230, 213, 168, 0.1);
 }
 
 .success .roll-outcome::before,
@@ -138,16 +128,16 @@ const outcomeText = computed(() => isSuccess.value ? 'SUCCESS' : 'FAILURE')
 }
 
 .failure .roll-outcome {
-  color: #ffb0a8;
+  color: #5b1717;
   text-shadow:
-    0 0 10px rgba(82, 24, 24, 0.5),
-    0 0 18px rgba(248, 113, 113, 0.22),
-    0 0 34px rgba(245, 158, 11, 0.1);
+    0 0 10px rgba(18, 0, 0, 0.55),
+    0 0 16px rgba(68, 8, 8, 0.22),
+    0 0 28px rgba(122, 18, 18, 0.08);
 }
 
 .failure .roll-outcome::before,
 .failure .roll-outcome::after {
-  color: #ff9f7a;
+  color: #7a2020;
 }
 
 @keyframes fadeInUp {
@@ -158,6 +148,19 @@ const outcomeText = computed(() => isSuccess.value ? 'SUCCESS' : 'FAILURE')
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes outcomeReveal {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
   }
 }
 
