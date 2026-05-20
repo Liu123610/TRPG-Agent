@@ -395,102 +395,6 @@
       </div>
     </Teleport>
 
-    <div v-if="!isMapCollapsed && isMoveModeActive" class="move-panel">
-      <template v-if="moveEligibility">
-        <div class="move-panel-head">
-          <span class="move-panel-title">{{ movePanelTitle }}</span>
-          <span class="move-panel-status" :class="{ active: isMoveModeActive }">
-            {{ isMoveModeActive ? '已开启' : '未开启' }}
-          </span>
-        </div>
-        <div class="move-panel-grid">
-          <div>
-            <span>{{ moveActorLabel }}</span>
-            <strong>{{ moveEligibility.actorName }}</strong>
-          </div>
-          <div>
-            <span>{{ moveResourceLabel }}</span>
-            <strong>{{ moveResourceText }}</strong>
-          </div>
-          <div>
-            <span>起点</span>
-            <strong>({{ formatNumber(moveEligibility.fromX) }}, {{ formatNumber(moveEligibility.fromY) }})</strong>
-          </div>
-          <div>
-            <span>终点</span>
-            <strong>{{ moveTarget ? `(${formatNumber(moveTarget.x)}, ${formatNumber(moveTarget.y)})` : '待选择' }}</strong>
-          </div>
-          <div>
-            <span>预计距离</span>
-            <strong>{{ moveDistance === null ? '待选择' : `${formatNumber(moveDistance)} 尺` }}</strong>
-          </div>
-          <div>
-            <strong :class="{ danger: !isMoveAvailable }">
-              {{ moveValidationText }}
-            </strong>
-          </div>
-        </div>
-        <div class="move-panel-actions">
-          <button
-            class="move-action-btn"
-            type="button"
-            :disabled="isSubmittingMove"
-            @click="toggleMoveMode"
-          >
-            {{ isMoveModeActive ? '取消移动' : `开始${movePanelTitle}` }}
-          </button>
-          <button
-            class="move-action-btn subtle"
-            type="button"
-            :disabled="!isMoveModeActive || !moveTarget || isSubmittingMove"
-            @click="clearMovePreview"
-          >
-            清除目标
-          </button>
-          <button
-            class="move-action-btn primary"
-            type="button"
-            :disabled="!canConfirmMove"
-            @click="submitMoveRequest"
-          >
-            {{ isSubmittingMove ? '移动中...' : '确认移动' }}
-          </button>
-        </div>
-      </template>
-      <div v-else class="move-disabled-reason">
-        {{ moveDisabledReason }}
-      </div>
-    </div>
-
-    <div v-if="selectedUnit && !isMapCollapsed" class="unit-detail">
-      <div class="unit-detail-head">
-        <span class="unit-name">{{ selectedUnit.name }}</span>
-        <span class="unit-id">{{ selectedUnit.id }}</span>
-      </div>
-      <div class="detail-grid">
-        <div>
-          <span>坐标</span>
-          <strong>({{ formatNumber(selectedUnit.x) }}, {{ formatNumber(selectedUnit.y) }})</strong>
-        </div>
-        <div>
-          <span>阵营</span>
-          <strong>{{ sideLabel(selectedUnit.side) }}</strong>
-        </div>
-        <div v-if="selectedUnit.hp !== undefined">
-          <span>生命值</span>
-          <strong>{{ selectedUnit.hp }} / {{ selectedUnit.max_hp ?? '?' }}</strong>
-        </div>
-        <div v-if="selectedUnit.ac !== undefined">
-          <span>护甲</span>
-          <strong>{{ selectedUnit.ac }}</strong>
-        </div>
-      </div>
-      <div v-if="selectedUnit.conditions.length" class="condition-line">
-        <span v-for="condition in selectedUnit.conditions" :key="condition" class="mini-condition">
-          {{ condition }}
-        </span>
-      </div>
-    </div>
   </section>
 </template>
 
@@ -550,6 +454,9 @@ type SelectedUnitPayload = {
   x: number
   y: number
   hp?: number
+  maxHp?: number
+  ac?: number
+  conditions?: string[]
   isDead?: boolean
 }
 
@@ -785,6 +692,9 @@ watch(
       x: unit.x,
       y: unit.y,
       hp: unit.hp,
+      maxHp: unit.max_hp,
+      ac: unit.ac,
+      conditions: unit.conditions,
       isDead: unit.isDead,
     })
   },
@@ -1260,6 +1170,9 @@ const handleUnitDoubleClick = (unitId: string) => {
     x: unit.x,
     y: unit.y,
     hp: unit.hp,
+    maxHp: unit.max_hp,
+    ac: unit.ac,
+    conditions: unit.conditions,
     isDead: unit.isDead,
   })
 }
