@@ -11,15 +11,15 @@ if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
 from app.services.tools.adventure_tools import (  # noqa: E402
-    advance_adventure,
     claim_adventure_reward,
-    inspect_adventure_state,
-    load_adventure_node,
-    manage_adventure,
-    mark_adventure_event,
-    reveal_adventure_clue,
-    search_adventure_nodes,
-    switch_adventure_node,
+    _advance_adventure_impl,
+    _inspect_adventure_state_impl,
+    _load_adventure_node_impl,
+    _mark_adventure_event_impl,
+    _resolve_adventure_node_impl,
+    _reveal_adventure_clue_impl,
+    _search_adventure_nodes_impl,
+    _switch_adventure_node_impl,
 )
 
 
@@ -38,7 +38,7 @@ def _payload(result: Command) -> dict:
 
 
 def test_load_default_adventure_hook_node():
-    result = _invoke_tool(load_adventure_node, tool_input={"state": {}})
+    result = _load_adventure_node_impl(None, {}, "adventure-test-call")
 
     assert isinstance(result, Command)
     payload = _payload(result)
@@ -49,52 +49,13 @@ def test_load_default_adventure_hook_node():
     assert "candidate_exits" not in payload["node"]
 
 
-def test_manage_adventure_loads_default_node():
-    result = _invoke_tool(manage_adventure, tool_input={"action": "load_node", "state": {}})
-
-    assert isinstance(result, Command)
-    payload = _payload(result)
-    assert payload["node"]["id"] == "adventure_hook_meet_me_in_phandalin"
-    assert payload["available_exits"][0]["id"] == "begin_escort_journey"
-
-
-def test_inspect_adventure_state_can_load_skill_instructions():
-    result = _invoke_tool(
-        inspect_adventure_state,
-        tool_input={"include_help": True, "state": {}},
-    )
+def test_inspect_adventure_state_impl_can_load_skill_instructions():
+    result = _inspect_adventure_state_impl(True, {}, "adventure-test-call")
 
     content = result.update["messages"][0].content
     assert "冒险模组主持技能" in content
-    assert "manage_adventure" in content
-    assert 'action="load_node"' in content
-
-
-def test_manage_adventure_help_loads_skill_instructions():
-    result = _invoke_tool(manage_adventure, tool_input={"action": "help", "state": {}})
-
-    content = result.update["messages"][0].content
-    assert "冒险模组主持技能" in content
-    assert "manage_adventure" in content
-    assert 'action="search_nodes"' in content
-    assert 'action="resolve"' in content
-    assert 'action="reveal_clue"' not in content
-    assert 'action="mark_event"' not in content
-
-
-def test_manage_adventure_schema_exposes_only_hosting_path_actions():
-    schema = manage_adventure.args_schema.model_json_schema()
-    assert schema["properties"]["action"]["enum"] == [
-        "help",
-        "load_node",
-        "search_nodes",
-        "switch_node",
-        "resolve",
-        "advance",
-    ]
-    assert "clue_id" not in schema["properties"]
-    assert "event_id" not in schema["properties"]
-    assert "include_help" not in schema["properties"]
+    assert "claim_adventure_reward" in content
+    assert "manage_adventure" not in content
 
 
 def test_claim_reward_tool_schema_does_not_leak_concrete_reward_ids():
@@ -104,7 +65,7 @@ def test_claim_reward_tool_schema_does_not_leak_concrete_reward_ids():
     assert "goblin_ambush_hideout_75_xp" not in schema_text
 
 
-def test_manage_adventure_advance_settles_single_exit_local_requirements():
+def test_advance_impl_settles_single_exit_local_requirements():
     state = {
         "adventure": {
             "module_id": "lost_mine",
@@ -118,14 +79,7 @@ def test_manage_adventure_advance_settles_single_exit_local_requirements():
         }
     }
 
-    advanced = _invoke_tool(
-        manage_adventure,
-        tool_input={
-            "action": "advance",
-            "option_id": "begin_escort_journey",
-            "state": state,
-        },
-    )
+    advanced = _advance_adventure_impl("begin_escort_journey", state, "adventure-test-call")
 
     adventure = advanced.update["adventure"]
     assert adventure["active_node_id"] == "goblin_ambush"
@@ -147,41 +101,26 @@ def test_advance_requires_completed_event_when_exit_has_condition():
         }
     }
 
-    blocked = _invoke_tool(
-        advance_adventure,
-        tool_input={"option_id": "investigate_goblin_trail", "state": state},
-    )
+    blocked = _advance_adventure_impl("investigate_goblin_trail", state, "adventure-test-call")
     assert "出口条件未满足" in _payload(blocked)["error"]
 
-    marked = _invoke_tool(
-        mark_adventure_event,
-        tool_input={"event_id": "goblin_ambush_resolved", "state": state},
-    )
+    marked = _mark_adventure_event_impl("goblin_ambush_resolved", state, "adventure-test-call")
     state["adventure"] = marked.update["adventure"]
 
-    still_blocked = _invoke_tool(
-        advance_adventure,
-        tool_input={"option_id": "investigate_goblin_trail", "state": state},
-    )
+    still_blocked = _advance_adventure_impl("investigate_goblin_trail", state, "adventure-test-call")
     assert "出口条件未满足" in _payload(still_blocked)["error"]
 
-    revealed = _invoke_tool(
-        reveal_adventure_clue,
-        tool_input={"clue_id": "goblin_trail", "state": state},
-    )
+    revealed = _reveal_adventure_clue_impl("goblin_trail", state, "adventure-test-call")
     state["adventure"] = revealed.update["adventure"]
 
-    advanced = _invoke_tool(
-        advance_adventure,
-        tool_input={"option_id": "investigate_goblin_trail", "state": state},
-    )
+    advanced = _advance_adventure_impl("investigate_goblin_trail", state, "adventure-test-call")
     assert advanced.update["adventure"]["active_node_id"] == "goblin_trail_to_cragmaw_hideout"
     assert "goblin_ambush" in advanced.update["adventure"]["completed_node_ids"]
     assert advanced.update["adventure"]["breadcrumb_node_ids"][-1] == "goblin_trail_to_cragmaw_hideout"
     assert advanced.update["adventure"]["deferred_node_ids"] == []
 
 
-def test_manage_adventure_can_resolve_clue_and_advance():
+def test_adventure_impl_can_resolve_clue_and_advance():
     state = {
         "player": {"name": "英雄", "xp": 0},
         "adventure": {
@@ -195,31 +134,25 @@ def test_manage_adventure_can_resolve_clue_and_advance():
         }
     }
 
-    resolved = _invoke_tool(
-        manage_adventure,
-        tool_input={"action": "resolve", "clue_ids": ["goblin_trail"], "event_ids": ["goblin_ambush_resolved"], "state": state},
+    resolved = _resolve_adventure_node_impl(
+        "",
+        ["goblin_trail"],
+        ["goblin_ambush_resolved"],
+        state,
+        "adventure-test-call",
     )
     state["adventure"] = resolved.update["adventure"]
 
-    advanced = _invoke_tool(
-        manage_adventure,
-        tool_input={"action": "advance", "option_id": "investigate_goblin_trail", "state": state},
-    )
+    advanced = _advance_adventure_impl("investigate_goblin_trail", state, "adventure-test-call")
 
     assert advanced.update["adventure"]["active_node_id"] == "goblin_trail_to_cragmaw_hideout"
 
     state["adventure"] = advanced.update["adventure"]
 
-    trail_resolved = _invoke_tool(
-        manage_adventure,
-        tool_input={"action": "resolve", "state": state},
-    )
+    trail_resolved = _resolve_adventure_node_impl("", None, None, state, "adventure-test-call")
     state["adventure"] = trail_resolved.update["adventure"]
 
-    hideout = _invoke_tool(
-        manage_adventure,
-        tool_input={"action": "advance", "option_id": "follow_trail_to_hideout", "state": state},
-    )
+    hideout = _advance_adventure_impl("follow_trail_to_hideout", state, "adventure-test-call")
 
     assert hideout.update["adventure"]["active_node_id"] == "cragmaw_hideout_entrance"
     assert hideout.update["adventure"]["claimed_reward_ids"] == []
@@ -349,7 +282,7 @@ def test_claim_adventure_reward_adds_gold_to_player_coins():
     assert "+10 GP" in payload["message"]
 
 
-def test_manage_adventure_resolve_returns_available_exits_after_scene_result():
+def test_resolve_impl_returns_available_exits_after_scene_result():
     state = {
         "adventure": {
             "module_id": "lost_mine",
@@ -362,15 +295,12 @@ def test_manage_adventure_resolve_returns_available_exits_after_scene_result():
         }
     }
 
-    resolved = _invoke_tool(
-        manage_adventure,
-        tool_input={
-            "action": "resolve",
-            "outcome": "地精伏击已结束，玩家发现了通向窝点的踪迹。",
-            "clue_ids": ["goblin_trail"],
-            "event_ids": ["goblin_ambush_resolved"],
-            "state": state,
-        },
+    resolved = _resolve_adventure_node_impl(
+        "地精伏击已结束，玩家发现了通向窝点的踪迹。",
+        ["goblin_trail"],
+        ["goblin_ambush_resolved"],
+        state,
+        "adventure-test-call",
     )
 
     payload = _payload(resolved)
@@ -385,7 +315,7 @@ def test_manage_adventure_resolve_returns_available_exits_after_scene_result():
     ]
 
 
-def test_manage_adventure_resolve_rejects_events_outside_current_node():
+def test_resolve_impl_rejects_events_outside_current_node():
     state = {
         "adventure": {
             "module_id": "lost_mine",
@@ -398,31 +328,26 @@ def test_manage_adventure_resolve_rejects_events_outside_current_node():
         }
     }
 
-    resolved = _invoke_tool(
-        manage_adventure,
-        tool_input={"action": "resolve", "event_ids": ["goblin_ambush_resolved"], "state": state},
-    )
+    resolved = _resolve_adventure_node_impl("", None, ["goblin_ambush_resolved"], state, "adventure-test-call")
 
     assert resolved.update["adventure"]["completed_event_ids"] == []
 
 
-def test_compat_mark_event_rejects_events_outside_current_node():
-    result = _invoke_tool(
-        mark_adventure_event,
-        tool_input={
-            "event_id": "goblin_ambush_resolved",
-            "state": {
-                "adventure": {
-                    "module_id": "lost_mine",
-                    "active_node_id": "adventure_hook_meet_me_in_phandalin",
-                    "unlocked_node_ids": ["adventure_hook_meet_me_in_phandalin"],
-                    "completed_node_ids": [],
-                    "known_clue_ids": [],
-                    "completed_event_ids": [],
-                    "pending_exit_option_ids": [],
-                }
-            },
+def test_mark_event_impl_rejects_events_outside_current_node():
+    result = _mark_adventure_event_impl(
+        "goblin_ambush_resolved",
+        {
+            "adventure": {
+                "module_id": "lost_mine",
+                "active_node_id": "adventure_hook_meet_me_in_phandalin",
+                "unlocked_node_ids": ["adventure_hook_meet_me_in_phandalin"],
+                "completed_node_ids": [],
+                "known_clue_ids": [],
+                "completed_event_ids": [],
+                "pending_exit_option_ids": [],
+            }
         },
+        "adventure-test-call",
     )
 
     payload = _payload(result)
@@ -431,10 +356,7 @@ def test_compat_mark_event_rejects_events_outside_current_node():
 
 
 def test_advance_with_event_id_returns_exit_hint():
-    result = _invoke_tool(
-        manage_adventure,
-        tool_input={"action": "advance", "option_id": "goblin_ambush_resolved", "state": {}},
-    )
+    result = _advance_adventure_impl("goblin_ambush_resolved", {}, "adventure-test-call")
 
     payload = _payload(result)
     assert "当前节点没有出口" in payload["error"]
@@ -443,10 +365,7 @@ def test_advance_with_event_id_returns_exit_hint():
 
 
 def test_search_adventure_nodes_finds_module_material():
-    result = _invoke_tool(
-        search_adventure_nodes,
-        tool_input={"query": "地精伏击", "state": {}},
-    )
+    result = _search_adventure_nodes_impl("地精伏击", 5, {}, "adventure-test-call")
 
     payload = _payload(result)
     result_ids = [item["id"] for item in payload["results"]]
@@ -454,10 +373,7 @@ def test_search_adventure_nodes_finds_module_material():
 
 
 def test_load_ambush_node_includes_pdf_guidance():
-    result = _invoke_tool(
-        load_adventure_node,
-        tool_input={"node_id": "goblin_ambush", "state": {}},
-    )
+    result = _load_adventure_node_impl("goblin_ambush", {}, "adventure-test-call")
 
     payload = _payload(result)
     node = payload["node"]
@@ -469,10 +385,7 @@ def test_load_ambush_node_includes_pdf_guidance():
 
 
 def test_load_ambush_node_overrides_legacy_surprise_rule():
-    result = _invoke_tool(
-        load_adventure_node,
-        tool_input={"node_id": "goblin_ambush", "state": {}},
-    )
+    result = _load_adventure_node_impl("goblin_ambush", {}, "adventure-test-call")
 
     payload = _payload(result)
     node = payload["node"]
@@ -484,14 +397,8 @@ def test_load_ambush_node_overrides_legacy_surprise_rule():
 
 
 def test_search_adventure_nodes_uses_dm_guidance_and_subsections():
-    rest_result = _invoke_tool(
-        search_adventure_nodes,
-        tool_input={"query": "休息 75 XP", "state": {}},
-    )
-    reward_result = _invoke_tool(
-        search_adventure_nodes,
-        tool_input={"query": "75 XP 奖励经验值", "state": {}},
-    )
+    rest_result = _search_adventure_nodes_impl("休息 75 XP", 5, {}, "adventure-test-call")
+    reward_result = _search_adventure_nodes_impl("75 XP 奖励经验值", 5, {}, "adventure-test-call")
 
     rest_ids = [item["id"] for item in _payload(rest_result)["results"]]
     reward_ids = [item["id"] for item in _payload(reward_result)["results"]]
@@ -513,13 +420,11 @@ def test_switch_adventure_node_updates_bookmark_without_exit_requirement():
         }
     }
 
-    result = _invoke_tool(
-        switch_adventure_node,
-        tool_input={
-            "node_id": "phandalin",
-            "reason": "玩家决定暂时不追踪地精，继续护送补给。",
-            "state": state,
-        },
+    result = _switch_adventure_node_impl(
+        "phandalin",
+        "玩家决定暂时不追踪地精，继续护送补给。",
+        state,
+        "adventure-test-call",
     )
 
     assert result.update["adventure"]["active_node_id"] == "phandalin"

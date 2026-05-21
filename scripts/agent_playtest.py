@@ -10,10 +10,12 @@ import argparse
 import asyncio
 import json
 import os
+import socket
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 
@@ -21,6 +23,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 BACKEND_DIR = ROOT_DIR / "backend"
 PLAYTEST_DIR = ROOT_DIR / "logs" / "agent_playtests"
 CURRENT_SESSION_FILE = PLAYTEST_DIR / "current_session.json"
+DEFAULT_DATABASE_BACKEND = "postgres"
+DEFAULT_DATABASE_URL = "postgresql://trpg:trpg@localhost:5432/trpg_agent"
 
 # 中文注释：playtest 使用项目真实配置；当前项目默认 PostgreSQL，便于前端和数据库直接复查对话。
 os.environ.setdefault("TRPG_AGENT_TRACE_DIR", str(ROOT_DIR / "logs" / "agent_traces"))
@@ -33,6 +37,63 @@ if hasattr(sys.stdout, "reconfigure"):
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 os.chdir(BACKEND_DIR)
+
+
+def _early_database_backend() -> str:
+    """重型后端导入前读取数据库类型，避免 Postgres 未启动时先卡在初始化。"""
+    return os.environ.get("TRPG_DATABASE_BACKEND") or os.environ.get("DATABASE_BACKEND") or DEFAULT_DATABASE_BACKEND
+
+
+def _early_database_url() -> str:
+    """保持和 Settings 默认值一致，专用于 import 前的快速连通性检查。"""
+    return os.environ.get("TRPG_DATABASE_URL") or os.environ.get("DATABASE_URL") or DEFAULT_DATABASE_URL
+
+
+def _early_command_needs_database() -> bool:
+    """doctor/latest 不需要真实图状态；其他命令在重型导入前先确认数据库可达。"""
+    return any(command in sys.argv[1:] for command in {"send", "state", "end-turn", "interactive"})
+
+
+def _early_postgres_preflight() -> None:
+    """用 2 秒 TCP 探测替代漫长的 checkpointer 初始化等待。"""
+    if not _early_command_needs_database() or _early_database_backend() != "postgres":
+        return
+    parsed = urlparse(_early_database_url())
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 5432
+    try:
+        with socket.create_connection((host, port), timeout=2.0):
+            return
+    except OSError as exc:
+        raise SystemExit(_postgres_unavailable_message(host, port, exc)) from exc
+
+
+def _postgres_unavailable_message(host: str, port: int, exc: OSError) -> str:
+    """给 playtest 使用者一个可直接复制的修复提示。"""
+    docker = _docker_command_hint()
+    return (
+        f"PostgreSQL is not reachable at {host}:{port} ({exc}).\n"
+        "Agent playtest uses the real PostgreSQL database, so the test was stopped before initializing LangGraph.\n\n"
+        "Start the database first:\n"
+        f"  {docker} compose -f docker-compose.postgres.yml up -d\n\n"
+        "Then verify:\n"
+        "  .\\.venv\\Scripts\\python.exe scripts\\agent_playtest.py doctor\n"
+    )
+
+
+def _docker_command_hint() -> str:
+    """Windows 上 Docker Desktop 常不在 PATH，优先返回项目机器上常见的完整路径。"""
+    candidates = [
+        Path(os.environ.get("ProgramFiles", "")) / "Docker" / "Docker" / "resources" / "bin" / "docker.exe",
+        Path.home() / "AppData" / "Local" / "Programs" / "DockerDesktop" / "resources" / "bin" / "docker.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return f'& "{candidate}"'
+    return "docker"
+
+
+_early_postgres_preflight()
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage  # noqa: E402
 from app.graph.constants import ROUTER_NODE  # noqa: E402
@@ -135,8 +196,28 @@ def _state_values(state: Any) -> dict[str, Any]:
 
 
 async def _build_service() -> ChatSessionService:
+    _ensure_database_ready()
     graph = build_graph(checkpointer=await get_checkpointer(settings))
     return ChatSessionService(graph=graph)
+
+
+def _ensure_database_ready() -> None:
+    """在创建 checkpointer 前快速检查 PostgreSQL，避免 Docker 未启动时长时间卡死。"""
+    if settings.database_backend != "postgres":
+        return
+    _check_postgres_tcp(settings.database_url or "")
+
+
+def _check_postgres_tcp(database_url: str, *, timeout_seconds: float = 2.0) -> None:
+    """只做 TCP 连通性探测；认证和迁移错误仍交给真实数据库层暴露。"""
+    parsed = urlparse(database_url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 5432
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds):
+            return
+    except OSError as exc:
+        raise SystemExit(_postgres_unavailable_message(host, port, exc)) from exc
 
 
 async def _get_state(service: ChatSessionService, session_id: str) -> dict[str, Any]:
@@ -470,11 +551,26 @@ def cmd_doctor(_: argparse.Namespace) -> None:
     print(f"  database_backend: {settings.database_backend}")
     print(f"  memory_db_path: {settings.memory_db_path}")
     print(f"  database_url: {settings.database_url}")
+    print(f"  database_ready: {_database_ready_text()}")
     print(f"  llm_model: {settings.llm_model}")
     print(f"  llm_base_url: {settings.llm_base_url or 'default'}")
     print(f"  llm_timeout_seconds: {settings.llm_timeout_seconds}")
     print(f"  has_llm_api_key: {bool(settings.llm_api_key.strip())}")
     print(f"  artifacts_dir: {PLAYTEST_DIR}")
+
+
+def _database_ready_text() -> str:
+    """doctor 只报告连通性，不阻断配置排查。"""
+    if settings.database_backend != "postgres":
+        return "not required"
+    parsed = urlparse(settings.database_url or "")
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 5432
+    try:
+        with socket.create_connection((host, port), timeout=2.0):
+            return f"yes ({host}:{port})"
+    except OSError as exc:
+        return f"no ({host}:{port}; {exc})"
 
 
 def build_parser() -> argparse.ArgumentParser:

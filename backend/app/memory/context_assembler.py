@@ -1441,7 +1441,7 @@ def summarize_tool_message(message: ToolMessage) -> str:
         # 多目标法术（如魔法飞弹）每个目标的 HP 变化都在工具返回里，不能只保留前三行。
         return f"[工具:{tool_name}] {compact_text(raw_text, 2000)}"
 
-    if tool_name == "buy_item":
+    if tool_name == "manage_inventory":
         # 价目表是后续购物决策依据，不能被通用两行摘要折叠掉。
         return f"[工具:{tool_name}] {compact_text(raw_text, 3000)}"
 

@@ -4,7 +4,7 @@
 
 ## 入口工具
 
-统一使用 `modify_character_state`。不要调用旧的 `apply_condition`、`remove_condition`；这些只保留给历史调用兼容。
+统一使用 `modify_character_state`，状态效果不再提供独立旧工具入口。
 
 经验、升级、法师奥术传承、战士武术范型属于 `character_progression` 技能。需要成长流程时，调用 `modify_character_state(action="help", payload={"topic": "progression"})` 查看说明。
 

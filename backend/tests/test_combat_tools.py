@@ -796,7 +796,7 @@ class TestAllySystem:
     def test_use_healing_potion_feeds_dying_ally(self):
         """喂治疗药水可把 0 HP 友方拉起，并消耗动作。"""
         from app.allies.profiles import get_ally_profile
-        from app.services.tools.item_tools import use_item
+        from app.services.tools.item_tools import manage_inventory
         from app.services.tools._helpers import prepare_character_for_combat
 
         actor = prepare_character_for_combat(get_ally_profile("fighter_companion"), side="ally")
@@ -820,8 +820,9 @@ class TestAllySystem:
 
         with patch("app.services.tools.item_tools.d20.roll", return_value=d20.roll("6")):
             result = _invoke_tool(
-                use_item,
+                manage_inventory,
                 tool_input={
+                    "action": "use",
                     "item_id": "potion_of_healing",
                     "actor_id": "fighter_companion",
                     "target_id": "apprentice_wizard",
@@ -842,7 +843,7 @@ class TestAllySystem:
     def test_use_healing_potion_feed_requires_touch_distance(self):
         """喂药需要接触目标，不能隔空治疗。"""
         from app.allies.profiles import get_ally_profile
-        from app.services.tools.item_tools import use_item
+        from app.services.tools.item_tools import manage_inventory
         from app.services.tools._helpers import prepare_character_for_combat
 
         actor = prepare_character_for_combat(get_ally_profile("fighter_companion"), side="ally")
@@ -857,8 +858,9 @@ class TestAllySystem:
         }
 
         result = _invoke_tool(
-            use_item,
+            manage_inventory,
             tool_input={
+                "action": "use",
                 "item_id": "potion_of_healing",
                 "actor_id": "fighter_companion",
                 "target_id": "apprentice_wizard",

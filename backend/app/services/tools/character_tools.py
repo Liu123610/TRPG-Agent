@@ -1079,46 +1079,4 @@ def _choose_feat_command(
     ))
 
 
-@tool
-def grant_xp(
-    amount: int,
-    reason: str = "",
-    *,
-    state: Annotated[dict, InjectedState] = None,
-    tool_call_id: Annotated[str, InjectedToolCallId] = None,
-) -> Command:
-    """兼容旧调用：为玩家角色增加经验值。新模型可见入口是 modify_character_state。"""
-    return _grant_xp_command("player", amount, reason, state, tool_call_id)
-
-
-@tool
-def level_up(
-    *,
-    state: Annotated[dict, InjectedState] = None,
-    tool_call_id: Annotated[str, InjectedToolCallId] = None,
-) -> Command:
-    """兼容旧调用：将玩家角色升级到下一等级。新模型可见入口是 modify_character_state。"""
-    return _level_up_command("player", state, tool_call_id)
-
-
-@tool
-def choose_arcane_tradition(
-    tradition: str,
-    *,
-    state: Annotated[dict, InjectedState] = None,
-    tool_call_id: Annotated[str, InjectedToolCallId] = None,
-) -> Command:
-    """兼容旧调用：为法师选择奥术传承。新模型可见入口是 modify_character_state。"""
-    return _choose_arcane_tradition_command("player", tradition, state, tool_call_id)
-
-
-@tool
-def choose_fighter_archetype(
-    archetype: str,
-    *,
-    state: Annotated[dict, InjectedState] = None,
-    tool_call_id: Annotated[str, InjectedToolCallId] = None,
-) -> Command:
-    """兼容旧调用：为战士选择武术范型。新模型可见入口是 modify_character_state。"""
-    return _choose_fighter_archetype_command("player", archetype, state, tool_call_id)
 

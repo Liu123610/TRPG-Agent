@@ -860,18 +860,3 @@ def end_combat(
     return Command(update=update)
 
 
-@tool
-def clear_dead_units(
-    unit_ids: list[str] | None = None,
-    *,
-    state: Annotated[dict, InjectedState] = None,
-    tool_call_id: Annotated[str, InjectedToolCallId] = None,
-) -> Command:
-    """清除死亡单位档案。可指定 ID 列表部分清除，或不传参数清除全部。
-    适用于剧情上玩家已完成搜刮尸体、处理遗骸等环节后的清理。
-    参数示例：{"unit_ids": ["goblin_1"]}；清除全部用 {}。
-
-    Args:
-        unit_ids: 要清除的死亡单位 ID 列表；为空或不传则清除全部。
-    """
-    return _clear_dead_units_impl(unit_ids, state, tool_call_id)

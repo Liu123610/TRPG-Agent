@@ -4,7 +4,7 @@
 
 ## 入口工具
 
-统一使用 `manage_scene_units`。旧的 `spawn_ally`、`spawn_monsters`、`clear_dead_units` 只保留给历史调用兼容。
+统一使用 `manage_scene_units`，场景单位不再提供独立旧工具入口。
 
 ## 动作速查
 

@@ -54,33 +54,12 @@
       </TransitionGroup>
     </template>
 
-    <CombatActionSheet
-      :open="actionSheetOpen"
-      :actor-name="controlledActorName"
-      :groups="actionGroups"
-      :selected-target-name="selectedTargetName"
-      :disabled-end-turn="!canEndCurrentTurn"
-      :preferred-target="preferredActionTarget"
-      :target-options="targetOptions"
-      @close="closeActionSheet"
-      @submit="handleActionSubmit"
-      @submit-with-target="handleTargetedActionSubmit"
-      @blocked="handleActionBlocked"
-      @end-turn="handleEndTurn"
-    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import CombatActionSheet from './CombatActionSheet.vue'
 import HpBar from '../SideCharacterPanel/HpBar.vue'
-import {
-  buildCombatActionMenu,
-  buildCombatActionCommand,
-  type CombatActionMenuGroup,
-  type CombatActionMenuItem,
-} from '../../../Services_/combatActionCatalog'
 import type { AvailabilitySelectionUnit } from '../../../Services_/actionAvailabilityService'
 import type { PlayerState } from '../../../Services_/characterStateService'
 
@@ -113,15 +92,9 @@ const props = defineProps<{
   sceneUnits?: Record<string, any> | null
   selectedUnit?: AvailabilitySelectionUnit | null
   actionSheetRequestId?: number
-  sendCombatActionRequest?: ((message: string) => Promise<void>) | null
-  endCombatTurnRequest?: ((actorId: string) => Promise<void>) | null
-}>()
-const emit = defineEmits<{
-  actionNotice: [text: string]
+  requestCombatActionPanel?: ((preferredTarget?: AvailabilitySelectionUnit | null) => void) | null
 }>()
 
-const actionSheetOpen = ref(false)
-const preferredActionTarget = ref<CombatTargetOption | null>(null)
 const previousCurrentActorId = ref('')
 const lastHandledActionSheetRequestId = ref(0)
 
@@ -141,8 +114,6 @@ const currentActorId = computed(() => {
   const raw = props.combat?.current_actor_id
   return typeof raw === 'string' ? raw.trim() : ''
 })
-
-const playerDisplayName = computed(() => props.externalPlayer?.name?.trim() || '玩家')
 
 const hpUnits = computed<HpOverviewUnit[]>(() => {
   const participants = props.combat?.participants
@@ -211,39 +182,6 @@ const canOpenControlledActions = computed(() => {
   return combatActive.value && !!actor && actor.side !== 'enemy'
 })
 
-const canEndCurrentTurn = computed(() => {
-  const actor = currentActor.value
-  return combatActive.value && !!actor && actor.side !== 'enemy' && !!props.endCombatTurnRequest
-})
-
-const controlledActorName = computed(() => currentActor.value?.name || playerDisplayName.value)
-
-const controlledActorState = computed<PlayerState | null>(() => {
-  const actor = currentActor.value
-  if (!actor) return null
-  if (actor.isPlayerUnit) return props.externalPlayer
-
-  const participant = props.combat?.participants?.[actor.id]
-  if (!participant || typeof participant !== 'object') return null
-  return normalizeControlledActorState(participant as Record<string, any>, actor.id, actor.name, actor.side)
-})
-
-const selectedTargetName = computed(() => {
-  const target = props.selectedUnit
-  return target?.name?.trim() || ''
-})
-
-const actionGroups = computed<CombatActionMenuGroup[]>(() => {
-  const actorState = controlledActorState.value
-  if (!actorState) return []
-  return buildCombatActionMenu({
-    player: actorState,
-    combat: props.combat ?? null,
-    space: props.space ?? null,
-    selectedUnit: props.selectedUnit ?? null,
-  })
-})
-
 const targetOptions = computed<CombatTargetOption[]>(() => {
   return hpUnits.value
     .filter((unit) => unit.side === 'enemy' && unit.hp > 0)
@@ -267,9 +205,6 @@ watch(
   (actorId) => {
     if (!actorId || actorId === previousCurrentActorId.value) return
     previousCurrentActorId.value = actorId
-    const actor = hpUnits.value.find((unit) => unit.id === actorId)
-    preferredActionTarget.value = null
-    actionSheetOpen.value = !!actor && actor.side !== 'enemy'
   },
   { immediate: true },
 )
@@ -279,76 +214,23 @@ watch(
   (requestId) => {
     if (!requestId || requestId === lastHandledActionSheetRequestId.value) return
     lastHandledActionSheetRequestId.value = requestId
-    if (!canOpenControlledActions.value || !selectedEnemyTarget.value) return
-
-    // 中文注释：地图双击敌人时，把该敌人锁成这次弹窗的优先目标，点击攻击动作后直接提交。
-    preferredActionTarget.value = selectedEnemyTarget.value
-    actionSheetOpen.value = true
+    if (!canOpenControlledActions.value) return
+    if (selectedEnemyTarget.value && props.selectedUnit) {
+      props.requestCombatActionPanel?.({
+        ...props.selectedUnit,
+        hp: selectedEnemyTarget.value.hp,
+        maxHp: selectedEnemyTarget.value.maxHp,
+      })
+      return
+    }
+    props.requestCombatActionPanel?.(null)
   },
   { immediate: true },
 )
 
 const handleUnitClick = (unit: HpOverviewUnit) => {
   if (!unit.isCurrentActor || unit.side === 'enemy' || !canOpenControlledActions.value) return
-  preferredActionTarget.value = null
-  actionSheetOpen.value = true
-}
-
-/**
- * 中文注释：这里只负责把玩家意图送回聊天链路，不在面板层二次解析动作语义。
- */
-const handleActionSubmit = async (item: CombatActionMenuItem) => {
-  if (!props.sendCombatActionRequest) {
-    emitActionNotice('当前聊天发送器不可用，暂时无法提交战斗动作。')
-    return
-  }
-
-  closeActionSheet()
-  await props.sendCombatActionRequest(item.command)
-}
-
-/**
- * 中文注释：武器等定向动作在面板层只补足目标，不重写后端动作协议。
- */
-const handleTargetedActionSubmit = async (
-  payload: { item: CombatActionMenuItem; target: CombatTargetOption },
-) => {
-  if (!props.sendCombatActionRequest) {
-    emitActionNotice('当前聊天发送器不可用，暂时无法提交战斗动作。')
-    return
-  }
-
-  closeActionSheet()
-  await props.sendCombatActionRequest(
-    buildCombatActionCommand(payload.item.commandPrefix, payload.item.targetMode, payload.target),
-  )
-}
-
-const handleActionBlocked = (reason: string) => {
-  emitActionNotice(reason)
-}
-
-const handleEndTurn = async () => {
-  if (!props.endCombatTurnRequest) {
-    emitActionNotice('当前聊天发送器不可用，暂时无法提交结束回合请求。')
-    return
-  }
-  if (!currentActor.value || currentActor.value.side === 'enemy') {
-    emitActionNotice('当前不是玩家或友方单位的回合。')
-    return
-  }
-
-  closeActionSheet()
-  await props.endCombatTurnRequest(currentActor.value.id)
-}
-
-const closeActionSheet = () => {
-  actionSheetOpen.value = false
-  preferredActionTarget.value = null
-}
-
-const emitActionNotice = (text: string) => {
-  emit('actionNotice', text)
+  props.requestCombatActionPanel?.(null)
 }
 
 function compareUnitOrder(left: HpOverviewUnit, right: HpOverviewUnit, currentId: string): number {
@@ -388,52 +270,6 @@ function toNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
-function normalizeControlledActorState(
-  participant: Record<string, any>,
-  fallbackId: string,
-  fallbackName: string,
-  fallbackSide: string,
-): PlayerState {
-  // 中文注释：友方与玩家共用角色型动作菜单；缺失字段只补 UI 所需的空集合。
-  return {
-    id: normalizeText(participant.id) || fallbackId,
-    name: normalizeText(participant.name) || fallbackName,
-    role_class: normalizeText(participant.role_class),
-    level: toNumber(participant.level) || 1,
-    hp: toNumber(participant.hp),
-    max_hp: Math.max(1, toNumber(participant.max_hp)),
-    temp_hp: toNumber(participant.temp_hp),
-    ac: toNumber(participant.ac) || toNumber(participant.base_ac) || 10,
-    base_ac: toNumber(participant.base_ac) || undefined,
-    abilities: isRecord(participant.abilities) ? participant.abilities as Record<string, number> : {},
-    modifiers: isRecord(participant.modifiers) ? participant.modifiers as Record<string, number> : {},
-    conditions: Array.isArray(participant.conditions) ? participant.conditions : [],
-    resources: isRecord(participant.resources) ? participant.resources as Record<string, number> : {},
-    weapons: Array.isArray(participant.weapons) ? participant.weapons : [],
-    coins: isRecord(participant.coins) ? participant.coins as Record<string, number> : undefined,
-    inventory: Array.isArray(participant.inventory) ? participant.inventory : [],
-    known_spells: Array.isArray(participant.known_spells) ? participant.known_spells : [],
-    known_cantrips: Array.isArray(participant.known_cantrips) ? participant.known_cantrips : [],
-    spellcasting_ability: normalizeText(participant.spellcasting_ability),
-    concentrating_on: typeof participant.concentrating_on === 'string' ? participant.concentrating_on : null,
-    xp: typeof participant.xp === 'number' ? participant.xp : undefined,
-    class_features: Array.isArray(participant.class_features) || isRecord(participant.class_features)
-      ? participant.class_features
-      : [],
-    arcane_tradition: normalizeText(participant.arcane_tradition) || undefined,
-    speed: toNumber(participant.speed) || undefined,
-    movement_left: toNumber(participant.movement_left),
-    action_available: participant.action_available !== false,
-    extra_action_available: participant.extra_action_available === true,
-    bonus_action_available: participant.bonus_action_available !== false,
-    reaction_available: participant.reaction_available !== false,
-    side: fallbackSide,
-  } as PlayerState & { side: string }
-}
-
-function isRecord(value: unknown): value is Record<string, any> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
 </script>
 
 <style scoped>

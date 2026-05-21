@@ -849,8 +849,7 @@ def test_tool_profiles_expose_only_current_recommended_entries_in_stable_order()
         "manage_scene_units",
         "prepare_combat_start",
         "cast_spell",
-        "use_item",
-        "buy_item",
+        "manage_inventory",
         "use_class_action",
         "inspect_unit",
         "consult_rules_handbook",
@@ -871,13 +870,13 @@ def test_tool_profiles_expose_only_current_recommended_entries_in_stable_order()
     ]
 
 
-def test_compatibility_tools_are_toolnode_only_without_profile_duplicates():
-    """兼容工具只服务历史 ToolNode，不应重复登记正式 profile 工具。"""
-    from app.services.tools import _COMBAT_TOOLS, _COMPATIBILITY_TOOLS, _NARRATIVE_TOOLS, get_tools
+def test_toolnode_only_tools_are_runtime_backing_entries_without_profile_duplicates():
+    """ToolNode 只额外保留仍被工作流或执行器使用的底层战斗工具。"""
+    from app.services.tools import _COMBAT_TOOLS, _NARRATIVE_TOOLS, _RUNTIME_ONLY_TOOLS, get_tools
 
     profile_tool_names = {tool.name for tool in _NARRATIVE_TOOLS} | {tool.name for tool in _COMBAT_TOOLS}
-    compatibility_tool_names = {tool.name for tool in _COMPATIBILITY_TOOLS}
-    assert not (compatibility_tool_names & profile_tool_names)
+    runtime_only_tool_names = {tool.name for tool in _RUNTIME_ONLY_TOOLS}
+    assert not (runtime_only_tool_names & profile_tool_names)
 
     all_tool_names = {tool.name for tool in get_tools()}
     assert "use_class_feature" not in all_tool_names
@@ -892,7 +891,20 @@ def test_compatibility_tools_are_toolnode_only_without_profile_duplicates():
     assert "choose_arcane_tradition" not in all_tool_names
     assert "choose_fighter_archetype" not in all_tool_names
     assert "switch_plane_map" not in all_tool_names
-    assert "manage_adventure" in all_tool_names
+    assert "manage_adventure" not in all_tool_names
+    assert "inspect_adventure_state" not in all_tool_names
+    assert "load_adventure_node" not in all_tool_names
+    assert "search_adventure_nodes" not in all_tool_names
+    assert "switch_adventure_node" not in all_tool_names
+    assert "reveal_adventure_clue" not in all_tool_names
+    assert "mark_adventure_event" not in all_tool_names
+    assert "advance_adventure" not in all_tool_names
+    assert "create_plane_map" not in all_tool_names
+    assert "place_unit" not in all_tool_names
+    assert "move_unit" not in all_tool_names
+    assert "remove_unit" not in all_tool_names
+    assert "measure_distance" not in all_tool_names
+    assert "query_units_in_radius" not in all_tool_names
     assert "attack_action" in all_tool_names
     assert "use_monster_action" in all_tool_names
     assert "start_combat" in all_tool_names
@@ -900,7 +912,9 @@ def test_compatibility_tools_are_toolnode_only_without_profile_duplicates():
     assert "prepare_combat_start" in all_tool_names
     assert "prepare_combat_end" in all_tool_names
     assert "claim_adventure_reward" in all_tool_names
-    assert "buy_item" in all_tool_names
+    assert "buy_item" not in all_tool_names
+    assert "use_item" not in all_tool_names
+    assert "manage_inventory" in all_tool_names
     assert "use_class_action" in all_tool_names
 
 
@@ -956,8 +970,9 @@ def test_adventure_module_skill_is_registered_for_on_demand_help():
     content = load_skill_content("adventure_module")
 
     assert "冒险模组主持技能" in content
-    assert "manage_adventure" in content
-    assert 'action="resolve"' in content
+    assert "claim_adventure_reward" in content
+    assert "manage_adventure" not in content
+    assert 'action="resolve"' not in content
 
 
 def test_class_actions_skill_is_registered_for_real_dialogue_triggers():
@@ -1330,7 +1345,7 @@ def test_combat_executor_node_runs_delegated_tool_and_returns_trace():
         "attack_action",
         "cast_spell",
         "use_class_action",
-        "use_item",
+        "manage_inventory",
         "inspect_unit",
     }
 

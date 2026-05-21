@@ -1,4 +1,4 @@
-"""道具使用工具 — 当前只实现冒险模组常见药水。"""
+"""背包管理工具 — 当前只实现冒险常见药水。"""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from app.space.geometry import validate_unit_distance
 
 
 UseItemMode = Literal["drink", "feed", "throw"]
+InventoryAction = Literal["list_shop", "buy", "add", "use"]
 HEALING_POTION_ROLLS = {
     "potion_of_healing": "2d4+2",
     "potion_of_greater_healing": "4d4+4",
@@ -133,9 +134,9 @@ def _shop_catalog_text() -> str:
     return "\n".join(lines)
 
 
-def _buy_item_message(content: str, tool_call_id: str | None) -> ToolMessage:
-    """购物工具消息带稳定 name，便于上下文压缩器按工具类型保留关键信息。"""
-    return ToolMessage(content=content, tool_call_id=tool_call_id, name="buy_item")
+def _inventory_message(content: str, tool_call_id: str | None) -> ToolMessage:
+    """背包工具消息带稳定 name，便于上下文压缩器按工具类型保留关键信息。"""
+    return ToolMessage(content=content, tool_call_id=tool_call_id, name="manage_inventory")
 
 
 def _combat_action_type(mode: UseItemMode, actor_id: str, target_id: str) -> str:
@@ -216,8 +217,7 @@ def _use_item_intro(mode: UseItemMode, actor: dict, actor_id: str, target: dict,
     return f"{actor_name} 将 {item_name} 投掷给 {target_name}。"
 
 
-@tool
-def use_item(
+def _use_item_command(
     item_id: str,
     actor_id: str = "player",
     target_id: str = "",
@@ -226,12 +226,6 @@ def use_item(
     state: Annotated[dict, InjectedState] = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = None,
 ) -> Command:
-    """使用背包里的基础药水。
-    当前支持 potion_of_healing、potion_of_greater_healing、potion_of_invisibility、potion_of_vitality。
-    drink 只允许使用者自己饮用；省略 target_id 时目标就是 actor_id。
-    给别人用药必须显式使用 feed 或 throw：feed 为 5 尺贴身喂药，throw 为 20 尺投掷药水；二者都消耗动作。
-    2024 规则：自己喝药消耗附赠动作。
-    """
     if item_id not in CONSUMABLE_ITEMS:
         return Command(update={"messages": [ToolMessage(content=f"暂不支持的道具: {item_id}。", tool_call_id=tool_call_id)]})
 
@@ -279,33 +273,31 @@ def use_item(
     return Command(update=update)
 
 
-@tool
-def buy_item(
+def _buy_item_command(
     item_id: str = "",
     quantity: int = 1,
     *,
     state: Annotated[dict, InjectedState] = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = None,
 ) -> Command:
-    """在剧情中存在可信商人、补给点或交易机会时处理药水商店；不传 item_id 只查看待售清单，传 item_id 才花费 GP 购买。"""
     if not item_id.strip():
-        return Command(update={"messages": [_buy_item_message(_shop_catalog_text(), tool_call_id)]})
+        return Command(update={"messages": [_inventory_message(_shop_catalog_text(), tool_call_id)]})
 
     if item_id not in CONSUMABLE_ITEMS:
-        return Command(update={"messages": [_buy_item_message(f"暂不支持购买的道具: {item_id}。", tool_call_id)]})
+        return Command(update={"messages": [_inventory_message(f"暂不支持购买的道具: {item_id}。", tool_call_id)]})
     if quantity <= 0:
-        return Command(update={"messages": [_buy_item_message("购买数量必须大于 0。", tool_call_id)]})
+        return Command(update={"messages": [_inventory_message("购买数量必须大于 0。", tool_call_id)]})
 
     player = _state_value_to_dict(state.get("player") if state else None)
     if not player:
-        return Command(update={"messages": [_buy_item_message("玩家尚未加载，无法购物。", tool_call_id)]})
+        return Command(update={"messages": [_inventory_message("玩家尚未加载，无法购物。", tool_call_id)]})
 
     item = get_consumable_item(item_id)
     total_price = item.price_gp * quantity
     coins = {key: int(value) for key, value in dict(player.get("coins", {})).items()}
     current_gp = coins.get("gp", 0)
     if current_gp < total_price:
-        return Command(update={"messages": [_buy_item_message(f"GP 不足：购买 {quantity} 个{item.name}需要 {total_price} gp，当前只有 {current_gp} gp。", tool_call_id)]})
+        return Command(update={"messages": [_inventory_message(f"GP 不足：购买 {quantity} 个{item.name}需要 {total_price} gp，当前只有 {current_gp} gp。", tool_call_id)]})
 
     coins["gp"] = current_gp - total_price
     player["coins"] = coins
@@ -314,4 +306,89 @@ def buy_item(
         f"购物完成：购买 {quantity} 个{item.name}，花费 {total_price} gp；"
         f"剩余 {coins['gp']} gp，背包现有 {inventory_item['quantity']} 个。"
     )
-    return Command(update={"player": player, "messages": [_buy_item_message(content, tool_call_id)]})
+    return Command(update={"player": player, "messages": [_inventory_message(content, tool_call_id)]})
+
+
+def _add_item_command(
+    item_id: str,
+    quantity: int,
+    actor_id: str,
+    reason: str,
+    *,
+    state: Annotated[dict, InjectedState] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
+) -> Command:
+    """剧情拾取只加入已定义消耗品；模组节点奖励仍由 claim_adventure_reward 发放。"""
+    if item_id not in CONSUMABLE_ITEMS:
+        return Command(update={"messages": [_inventory_message(f"暂不支持加入背包的道具: {item_id}。", tool_call_id)]})
+    if quantity <= 0:
+        return Command(update={"messages": [_inventory_message("加入数量必须大于 0。", tool_call_id)]})
+    if not reason.strip():
+        return Command(update={"messages": [_inventory_message("剧情拾取或赠予必须提供 reason；模组节点奖励请使用 claim_adventure_reward。", tool_call_id)]})
+
+    ctx = _item_context(state or {})
+    owner, resolved_owner_id, owner_source = _locate_unit(ctx, actor_id)
+    if not owner:
+        return Command(update={"messages": [_inventory_message(f"找不到背包持有者 '{actor_id}'。", tool_call_id)]})
+
+    item_def = get_consumable_item(item_id)
+    entry = _add_inventory_item(owner, item_id, quantity)
+    update = _write_unit(ctx, owner, resolved_owner_id, owner_source)
+    update["messages"] = [
+        _inventory_message(
+            f"已加入背包：{owner.get('name', resolved_owner_id)} 获得 {quantity} 个{item_def.name}。"
+            f" 来源：{reason}。当前数量 {entry['quantity']} 个。",
+            tool_call_id,
+        )
+    ]
+    return Command(update=update)
+
+
+@tool
+def manage_inventory(
+    action: InventoryAction,
+    item_id: str = "",
+    quantity: int = 1,
+    actor_id: str = "player",
+    target_id: str = "",
+    mode: UseItemMode = "drink",
+    reason: str = "",
+    *,
+    state: Annotated[dict, InjectedState] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = None,
+) -> Command:
+    """统一管理背包里的基础消耗品。
+
+    list_shop 查看药水价目表；buy 在可信交易机会中扣 GP 购买；add 仅用于临时剧情拾取、
+    NPC 赠予或普通补给发放，不处理模组节点奖励、金币或 XP；use 使用背包药水并结算动作经济。
+
+    Args:
+        action: list_shop 查看价目表，buy 购买，add 剧情拾取/赠予/补给，use 使用道具。
+        item_id: 道具 ID，当前支持 potion_of_healing、potion_of_greater_healing、potion_of_invisibility、potion_of_vitality。
+        quantity: buy/add 的数量。
+        actor_id: use 时为使用者；add 时为背包持有者；默认 player。
+        target_id: use 时的目标；省略则为 actor_id。
+        mode: use 的方式，drink 自饮，feed 贴身喂药，throw 投掷药水。
+        reason: add 的剧情来源说明，必须是临时拾取、赠予或补给，不得用于节点奖励。
+    """
+    if action == "list_shop":
+        return Command(update={"messages": [_inventory_message(_shop_catalog_text(), tool_call_id)]})
+    if action == "buy":
+        return _buy_item_command(item_id=item_id, quantity=quantity, state=state, tool_call_id=tool_call_id)
+    if action == "add":
+        return _add_item_command(
+            item_id=item_id,
+            quantity=quantity,
+            actor_id=actor_id,
+            reason=reason,
+            state=state,
+            tool_call_id=tool_call_id,
+        )
+    return _use_item_command(
+        item_id=item_id,
+        actor_id=actor_id,
+        target_id=target_id,
+        mode=mode,
+        state=state,
+        tool_call_id=tool_call_id,
+    )

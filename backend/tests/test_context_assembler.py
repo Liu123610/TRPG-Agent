@@ -841,7 +841,7 @@ class ContextAssemblerTests(unittest.TestCase):
         self.assertIn("Goblin B HP: 7 → 3", projected)
         self.assertIn("剩余1环法术位", projected)
 
-    def test_buy_item_projection_keeps_shop_catalog_prices(self):
+    def test_manage_inventory_projection_keeps_shop_catalog_prices(self):
         tool_message = ToolMessage(
             content=(
                 "[商店待售清单]\n"
@@ -852,12 +852,12 @@ class ContextAssemblerTests(unittest.TestCase):
                 "[交易结果]\n购物完成：购买 1 个治疗药水，花费 50 gp；剩余 25 gp。"
             ),
             tool_call_id="call_buy",
-            name="buy_item",
+            name="manage_inventory",
         )
 
         projected = summarize_tool_message(tool_message)
 
-        self.assertIn("[工具:buy_item]", projected)
+        self.assertIn("[工具:manage_inventory]", projected)
         self.assertIn("[商店待售清单]", projected)
         self.assertIn("potion_of_healing", projected)
         self.assertIn("50 gp", projected)

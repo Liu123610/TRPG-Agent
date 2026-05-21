@@ -1,8 +1,12 @@
 <template>
-  <Teleport to="body">
+  <component :is="renderInOverlay ? 'Teleport' : 'div'" v-bind="teleportProps">
     <Transition name="combat-sheet-fade">
-      <div v-if="open" class="combat-sheet-overlay" @click.self="emit('close')">
-        <div class="combat-sheet">
+      <div
+        v-if="open"
+        :class="renderInOverlay ? 'combat-sheet-overlay' : 'combat-sheet-inline'"
+        @click.self="renderInOverlay ? emit('close') : undefined"
+      >
+        <div class="combat-sheet" :class="{ embedded: !renderInOverlay }">
           <div class="sheet-header">
             <div class="sheet-heading">
               <button
@@ -13,60 +17,59 @@
               >
                 ← 返回
               </button>
-              <div class="sheet-eyebrow">{{ pendingTargetItem ? '选择目标' : '当前行动' }}</div>
-              <h4 class="sheet-title">{{ pendingTargetItem ? buildTargetTitle(pendingTargetItem) : `${actorName} 的动作选择` }}</h4>
+              <h4 v-if="pendingTargetItem" class="sheet-title">{{ buildTargetTitle(pendingTargetItem) }}</h4>
             </div>
           </div>
 
-          <div v-if="selectedTargetName && !pendingTargetItem" class="sheet-target">
-            当前目标：<strong>{{ selectedTargetName }}</strong>
-          </div>
-
-          <div v-if="pendingTargetItem" class="sheet-groups">
-            <section class="sheet-group">
-              <div class="group-title">攻击对象</div>
-              <div v-if="targetOptions.length" class="group-list">
-                <button
-                  v-for="target in targetOptions"
-                  :key="target.id"
-                  type="button"
-                  class="action-item target-item"
-                  :class="`accent-${pendingTargetItem.accent}`"
-                  @click="handleTargetClick(target)"
-                >
-                  <span class="item-main">
-                    <span class="item-label">{{ target.name }}</span>
-                    <span class="item-detail">{{ resolveTargetDetail(target) }}</span>
-                  </span>
-                  <span class="item-state item-ready">攻击</span>
-                </button>
+          <div class="sheet-stage-viewport">
+            <Transition name="sheet-stage" mode="out-in">
+              <div v-if="pendingTargetItem" key="target-picker" class="sheet-groups">
+                <section class="sheet-group">
+                  <div class="group-title">攻击对象</div>
+                  <div v-if="targetOptions.length" class="group-list">
+                    <button
+                      v-for="target in targetOptions"
+                      :key="target.id"
+                      type="button"
+                      class="action-item target-item"
+                      :class="`accent-${pendingTargetItem.accent}`"
+                      @click="handleTargetClick(target)"
+                    >
+                      <span class="item-main">
+                        <span class="item-label">{{ target.name }}</span>
+                        <span class="item-detail">{{ resolveTargetDetail(target) }}</span>
+                      </span>
+                      <span class="item-state item-ready">攻击</span>
+                    </button>
+                  </div>
+                  <div v-else class="group-empty">当前没有可攻击目标。</div>
+                </section>
               </div>
-              <div v-else class="group-empty">当前没有可攻击目标。</div>
-            </section>
-          </div>
 
-          <div v-else class="sheet-groups">
-            <section v-for="group in groups" :key="group.id" class="sheet-group">
-              <div class="group-title">{{ group.title }}</div>
-              <div v-if="group.items.length" class="group-list">
-                <button
-                  v-for="item in group.items"
-                  :key="item.id"
-                  type="button"
-                  class="action-item"
-                  :class="[`accent-${item.accent}`, { disabled: !!item.disabledReason }]"
-                  @click="handleItemClick(item)"
-                >
-                  <span class="item-main">
-                    <span class="item-label">{{ item.label }}</span>
-                    <span class="item-detail">{{ item.detail }}</span>
-                  </span>
-                  <span v-if="item.disabledReason" class="item-state">{{ item.disabledReason }}</span>
-                  <span v-else class="item-state item-ready">可用</span>
-                </button>
+              <div v-else key="action-groups" class="sheet-groups">
+                <section v-for="group in groups" :key="group.id" class="sheet-group">
+                  <div class="group-title">{{ group.title }}</div>
+                  <div v-if="group.items.length" class="group-list">
+                    <button
+                      v-for="item in group.items"
+                      :key="item.id"
+                      type="button"
+                      class="action-item"
+                      :class="[`accent-${item.accent}`, { disabled: !!item.disabledReason }]"
+                      @click="handleItemClick(item)"
+                    >
+                      <span class="item-main">
+                        <span class="item-label">{{ item.label }}</span>
+                        <span class="item-detail">{{ item.detail }}</span>
+                      </span>
+                      <span v-if="item.disabledReason" class="item-state">{{ item.disabledReason }}</span>
+                      <span v-else class="item-state item-ready">可用</span>
+                    </button>
+                  </div>
+                  <div v-else class="group-empty">{{ group.emptyText }}</div>
+                </section>
               </div>
-              <div v-else class="group-empty">{{ group.emptyText }}</div>
-            </section>
+            </Transition>
           </div>
 
           <div class="sheet-footer">
@@ -82,11 +85,11 @@
         </div>
       </div>
     </Transition>
-  </Teleport>
+  </component>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { CombatActionMenuGroup, CombatActionMenuItem } from '../../../Services_/combatActionCatalog'
 
 type CombatTargetOption = {
@@ -105,11 +108,13 @@ const props = withDefaults(defineProps<{
   disabledEndTurn?: boolean
   preferredTarget?: CombatTargetOption | null
   targetOptions?: CombatTargetOption[]
+  renderInOverlay?: boolean
 }>(), {
   selectedTargetName: '',
   disabledEndTurn: false,
   preferredTarget: null,
   targetOptions: () => [],
+  renderInOverlay: false,
 })
 
 const emit = defineEmits<{
@@ -121,6 +126,7 @@ const emit = defineEmits<{
 }>()
 
 const pendingTargetItem = ref<CombatActionMenuItem | null>(null)
+const teleportProps = computed(() => props.renderInOverlay ? { to: 'body' } : {})
 
 watch(
   () => props.open,
@@ -140,14 +146,15 @@ const handleItemClick = (item: CombatActionMenuItem) => {
     return
   }
 
-  // 中文注释：若本次弹窗来自地图双击敌人，则敌方目标已明确，点击攻击动作后直接提交。
-  if (props.preferredTarget && item.targetMode === 'enemy') {
-    emit('submit', item)
+  // 中文注释：武器攻击固定先进入目标选择页，避免“已有目标时直接提交”把交互短路。
+  if (item.accent === 'weapon') {
+    pendingTargetItem.value = item
     return
   }
 
-  if (item.accent === 'weapon') {
-    pendingTargetItem.value = item
+  // 中文注释：非武器的敌向动作仍允许在已有明确目标时直接提交。
+  if (props.preferredTarget && item.targetMode === 'enemy') {
+    emit('submit', item)
     return
   }
 
@@ -175,6 +182,10 @@ function resolveTargetDetail(target: CombatTargetOption): string {
 </script>
 
 <style scoped>
+.combat-sheet-inline {
+  height: 100%;
+}
+
 .combat-sheet-overlay {
   position: fixed;
   inset: 0;
@@ -203,6 +214,15 @@ function resolveTargetDetail(target: CombatTargetOption): string {
   color: #f5efe4;
 }
 
+.combat-sheet.embedded {
+  width: 100%;
+  max-height: none;
+  border-radius: 24px;
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.28),
+    0 0 0 1px rgba(255, 244, 214, 0.05) inset;
+}
+
 .combat-sheet::-webkit-scrollbar {
   display: none;
   width: 0;
@@ -224,13 +244,6 @@ function resolveTargetDetail(target: CombatTargetOption): string {
   min-width: 0;
 }
 
-.sheet-eyebrow {
-  color: #b79a6b;
-  font-size: 11px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
 .sheet-title {
   margin: 0;
   font-size: 26px;
@@ -250,21 +263,31 @@ function resolveTargetDetail(target: CombatTargetOption): string {
   cursor: pointer;
 }
 
-.sheet-target {
-  margin: 0 24px 18px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  background: rgba(201, 168, 123, 0.09);
-  border: 1px solid rgba(201, 168, 123, 0.16);
-  color: #dbc9ab;
-  font-size: 13px;
-}
-
 .sheet-groups {
   display: flex;
   flex-direction: column;
   gap: 20px;
   padding: 0 24px 18px;
+}
+
+.sheet-stage-viewport {
+  position: relative;
+  overflow: hidden;
+}
+
+.sheet-stage-enter-active,
+.sheet-stage-leave-active {
+  transition: opacity 0.24s ease, transform 0.24s ease;
+}
+
+.sheet-stage-enter-from {
+  opacity: 0;
+  transform: translateX(26px);
+}
+
+.sheet-stage-leave-to {
+  opacity: 0;
+  transform: translateX(-26px);
 }
 
 .sheet-group {
